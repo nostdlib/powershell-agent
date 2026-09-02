@@ -1,0 +1,200 @@
+name: Build & Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - "**"
+
+concurrency:
+  group: ci-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  # ═════════════════════════════════════════════════════════════════════════
+  # Build — parse-check the single static agent file + the C2 fetch contract
+  # ═════════════════════════════════════════════════════════════════════════
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Syntax check (Parser::ParseFile)
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PWD 'src/powershell-agent.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | ForEach-Object {
+              Write-Host ("PARSE ERROR line {0}: {1}" -f $_.Extent.StartLineNumber, $_.Message)
+            }
+            exit 1
+          }
+          Write-Host "syntax OK"
+
+      - name: Contract check (what AgentBinaryService.LooksLikePowerShellAgent gates on)
+        shell: pwsh
+        run: |
+          $text = Get-Content -Raw src/powershell-agent.ps1
+          if ($text.Length -le 200) { Write-Host "FAILED: too short ($($text.Length) chars)"; exit 1 }
+          if ($text.TrimStart().StartsWith('<')) { Write-Host "FAILED: looks like an error page, not PowerShell"; exit 1 }
+          if (-not $text.Contains('function Invoke-Agent')) { Write-Host "FAILED: top-level entry 'function Invoke-Agent' missing"; exit 1 }
+          Write-Host "contract OK"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-powershell
+          retention-days: 1
+          path: src/
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Test — Windows PowerShell smoke run (H_URL unset ⇒ no local echo, clean 'fail')
+  # ═════════════════════════════════════════════════════════════════════════
+
+  test-windows-powershell:
+    needs: build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with: { name: build-powershell, path: src }
+      - name: Test agent (powershell.exe 5.1, H_URL unset)
+        shell: pwsh
+        run: |
+          Copy-Item src/powershell-agent.ps1 master.ps1
+          Add-Content -Path master.ps1 -Value 'Write-Output ("result: " + (Invoke-Agent))'
+          Remove-Item Env:H_URL -ErrorAction SilentlyContinue
+          # Real Windows PowerShell (the in-box target host), not pwsh.
+          $output = (powershell -NoProfile -ExecutionPolicy Bypass -File master.ps1 2>&1 | Out-String)
+          Write-Host $output
+          # The agent must be output-clean: exactly one line, the harness's own
+          # 'result: fail' — any local echo or error text fails the build.
+          if ($output.Trim() -ne "result: fail") {
+            Write-Host "FAILED: expected exactly 'result: fail', got:"
+            Write-Host $output
+            exit 1
+          }
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Gate — single required check for branch protection
+  # ═════════════════════════════════════════════════════════════════════════
+
+  all-tests:
+    if: always()
+    needs:
+      - build
+      - test-windows-powershell
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check all test results
+        run: |
+          echo "Build: ${{ needs.build.result }}"
+          results=(
+            "${{ needs.build.result }}"
+            "${{ needs.test-windows-powershell.result }}"
+          )
+          for r in "${results[@]}"; do
+            if [ "$r" != "success" ]; then
+              echo "One or more jobs failed or were cancelled"
+              exit 1
+            fi
+          done
+          echo "All tests passed"
+
+  # ═════════════════════════════════════════════════════════════════════════
+  # Preview Release — publish rolling pre-release from main
+  # ═════════════════════════════════════════════════════════════════════════
+  preview-build:
+    if: github.ref == 'refs/heads/main'
+    needs: [all-tests]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Syntax check (Parser::ParseFile)
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PWD 'src/powershell-agent.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | ForEach-Object {
+              Write-Host ("PARSE ERROR line {0}: {1}" -f $_.Extent.StartLineNumber, $_.Message)
+            }
+            exit 1
+          }
+          echo "syntax OK"
+
+      - name: Collect release files
+        run: |
+          mkdir -p artifacts
+          cp src/powershell-agent.ps1 artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: preview-powershell
+          retention-days: 1
+          path: artifacts/
+
+  preview-release:
+    if: github.ref == 'refs/heads/main'
+    needs: [preview-build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: preview-*
+
+      - name: Collect release files
+        run: |
+          mkdir -p release-files
+          find artifacts -type f -exec cp {} release-files/ \;
+          echo "Release files:"
+          ls -lh release-files/
+
+      - name: Create or update preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="preview"
+          TITLE="Preview (${GITHUB_SHA::7})"
+          BODY="Automated preview release from \`main\` branch.
+
+          **Commit:** [\`${GITHUB_SHA::7}\`](https://github.com/${{ github.repository }}/commit/${GITHUB_SHA})
+          **Date:** $(date -u '+%Y-%m-%d %H:%M UTC')
+
+          > This is a rolling pre-release that updates on every merge to \`main\`.
+          > For stable releases, see tagged versions (\`v*\`)."
+
+          # Delete existing preview release and tag if they exist
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          git push origin ":refs/tags/$TAG" 2>/dev/null || true
+
+          # Create fresh pre-release
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes "$BODY" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            release-files/*
