@@ -10,7 +10,8 @@ here is a bypass technique.
   an immediate re-POST after every empty answer, so the flow is a steady request train rather
   than jittered polling. Each request carries:
   - `Content-Type: application/octet-stream`
-  - The full `X-Agent-*` identity set (API 1): `X-Agent-Machine-Uuid`, `X-Agent-Hostname`,
+  - The full `X-Agent-*` identity set (API 1): `X-Agent-Machine-Uuid`, `X-Agent-Session-Key`,
+    `X-Agent-Hostname`,
     `X-Agent-Username`, `X-Agent-Arch`, `X-Agent-Process-Arch`, `X-Agent-Platform: Windows`,
     `X-Agent-Os-Version`, `X-Agent-Build`, `X-Agent-Name-Id: 3`,
     `X-Agent-Capabilities: 0800000000000000` — a header cluster no legitimate software emits

