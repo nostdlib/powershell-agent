@@ -36,6 +36,12 @@ disambiguation for free.
   `DispatchCommand`, `BuildIdentity`, the identity header names, and the
   `System.Runtime.Serialization.Formatters.Binary.BinaryFormatter` instantiation all appear in
   script-block text when logging is enabled. Module logging and transcription capture the same.
+  **Obfuscated builds** (the C2 panel's shipped form) change what text is observable: names are
+  randomized, comments stripped, and every string literal — the WMI class names, the header
+  names, the serde-chain names — is rewritten as runtime-assembled `(-join[char[]](…))` joins,
+  so those tokens never exist in the file, in the AMSI buffer, or in the 4104 text. What
+  remains observable is the structural layer: `New-Object`, `[wmiclass]`, `[Net.*]` type
+  accelerators, and member names — structure-anchored hunts still land; text hunts don't.
 - **AMSI**: the agent text and its host master pass through AMSI on Windows 10+ — an AMSI-aware
   EDR sees the full source before execution.
 - **Environment**: the beacon endpoint is set as the process env var `H_URL` before the agent
@@ -43,7 +49,9 @@ disambiguation for free.
   `NAME=value` process env vars.
 - **Identity reads**: `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid` (directly and via WMI
   `StdRegProv`), `Win32_ComputerSystemProduct.UUID`, `Win32_OperatingSystem`,
-  `Win32_Processor` — a WMI query cluster characteristic of implant fingerprinting.
+  `Win32_Processor` — a WMI query cluster characteristic of implant fingerprinting. In
+  obfuscated builds the class names travel as encoded string data, so the cluster shows in
+  behavior and WMI-activity ETW, not in file or script-block text.
 - **In-process deserialization** (UpgradeNetFramework): `BinaryFormatter.Deserialize` on a
   `MemoryStream` inside powershell.exe — watch for .NET serialization ETW/events and
   `COMPLUS_Version` being set.
