@@ -16,6 +16,8 @@
 #   • The default binder refuses string->enum: SecurityProtocol is set via Enum.ToObject.
 #   • A SOLO array inside @(...) unrolls to object[]; arrays in multi-element literals keep
 #     their type. Variable-stored references (PSObject-wrapped) are re-cast at the call site.
+#   • ',' binds LOOSER than arithmetic: @(a, b, c - 1) parses @(a, b, c) - 1 ("op_Subtraction"
+#     on Object[]). Hoist arithmetic into a variable before building an args array.
 # All constructs are .NET 2.0 / PS 2.0-safe per the host contract.
 #
 # DEBUG FLAVOR (the csharp-agent "#if DEBUG" analog — PowerShell has no preprocessor, so
@@ -267,7 +269,11 @@ function Invoke-Agent {
             try {
                 # The upgrade payload is latin-1 text after the opcode (the JScript agent's
                 # charCodeAt&255 semantics) — base64 bodies stay pure ASCII either way.
-                $payloadText = CallInst (CallStatic (ResolveM 'System.Text.Encoding') 'GetEncoding' @(28591)) 'GetString' @([byte[]]$frame, 5, $frame.Length - 5)
+                # ',' binds LOOSER than '-' — the length MUST be hoisted or the literal
+                # parses as @($frame, 5, $frame.Length) - 5 → op_Subtraction on Object[]
+                # (killed every 0x0B on arrival, found 2026-09-20).
+                $payloadLen = $frame.Length - 5
+                $payloadText = CallInst (CallStatic (ResolveM 'System.Text.Encoding') 'GetEncoding' @(28591)) 'GetString' @([byte[]]$frame, 5, $payloadLen)
                 $headerEnd = $payloadText.IndexOf("`n`n")
                 $headerLines = @()
                 $bodyText = ''
