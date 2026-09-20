@@ -3,8 +3,8 @@
 # debug build:
 #   dist/powershell-agent.ps1        release — every tagged line REMOVED (zero diagnostics)
 #   dist-debug/powershell-agent.ps1  debug   — tagged lines kept, the tag suffix dropped
-# The tag is the flavor: CI publishes dist/ to the rolling 'preview' release and
-# dist-debug/ to the rolling 'debug' release (same asset filename — the release tag, not
+# The tag is the flavor: CI publishes dist/ to the rolling 'release' tag and
+# dist-debug/ to the rolling 'debug' tag (same asset filename — the tag, not
 # the filename, carries the flavor). Gates (the build FAILS, not warns): both flavors
 # keep the fetch-contract needle and parse clean; the release flavor carries none of the
 # debug surface (the popup helper's tokens) and no leftover tag suffix.

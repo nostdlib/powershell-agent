@@ -130,12 +130,12 @@ jobs:
           echo "All tests passed"
 
   # ═════════════════════════════════════════════════════════════════════════
-  # Preview Releases — publish BOTH rolling pre-releases from main:
-  #   'preview' → dist/  (release flavor, zero diagnostics)
+  # Rolling Releases — publish BOTH rolling pre-releases from main:
+  #   'release' → dist/  (release flavor, zero diagnostics)
   #   'debug'   → dist-debug/ (MessageBox-per-step build, hand-debugging only)
   # Same asset filename on both — the tag is the flavor (the csharp-agent contract).
   # ═════════════════════════════════════════════════════════════════════════
-  preview-build:
+  rolling-build:
     if: github.ref == 'refs/heads/main'
     needs: [all-tests]
     runs-on: ubuntu-24.04
@@ -152,20 +152,20 @@ jobs:
       - name: Upload artifacts (release flavor)
         uses: actions/upload-artifact@v7
         with:
-          name: preview-powershell-release
+          name: rolling-powershell-release
           retention-days: 1
           path: dist/
 
       - name: Upload artifacts (debug flavor)
         uses: actions/upload-artifact@v7
         with:
-          name: preview-powershell-debug
+          name: rolling-powershell-debug
           retention-days: 1
           path: dist-debug/
 
-  preview-release:
+  rolling-release:
     if: github.ref == 'refs/heads/main'
-    needs: [preview-build]
+    needs: [rolling-build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -177,7 +177,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
-          pattern: preview-*
+          pattern: rolling-*
 
       - name: Collect release files
         run: |
@@ -187,21 +187,22 @@ jobs:
           echo "Release files:"; ls -lh release-files/
           echo "Debug files:"; ls -lh debug-files/
 
-      - name: Create or update preview release (release flavor)
+      - name: Create or update release tag (release flavor)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="preview"
-          TITLE="Preview (${GITHUB_SHA::7})"
-          BODY="Automated preview release from \`main\` branch.
+          TAG="release"
+          TITLE="Release (${GITHUB_SHA::7})"
+          BODY="Automated rolling release from \`main\` branch — zero diagnostics.
 
           **Commit:** [\`${GITHUB_SHA::7}\`](https://github.com/${{ github.repository }}/commit/${GITHUB_SHA})
           **Date:** $(date -u '+%Y-%m-%d %H:%M UTC')
 
           > This is a rolling pre-release that updates on every merge to \`main\`.
+          > Same asset filename as the \`debug\` release — the tag is the flavor.
           > For stable releases, see tagged versions (\`v*\`)."
 
-          # Delete existing preview release and tag if they exist
+          # Delete existing release tag if it exists
           gh release delete "$TAG" --yes 2>/dev/null || true
           git push origin ":refs/tags/$TAG" 2>/dev/null || true
 
@@ -225,7 +226,7 @@ jobs:
           **Commit:** [\`${GITHUB_SHA::7}\`](https://github.com/${{ github.repository }}/commit/${GITHUB_SHA})
           **Date:** $(date -u '+%Y-%m-%d %H:%M UTC')
 
-          > Same asset filename as the \`preview\` release — the tag is the flavor.
+          > Same asset filename as the \`release\` tag — the tag is the flavor.
           > Never deliver this to an operational target."
 
           # Delete existing debug release and tag if they exist

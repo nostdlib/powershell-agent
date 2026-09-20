@@ -96,7 +96,7 @@ idle iterations stay silent), `[cmd] 0x…` per dispatched command, `[exit] …`
 operator-visible and every call costs a click.
 
 CI publishes two rolling pre-releases from `main` with the same asset filename — **the tag is
-the flavor** (the csharp-agent contract): `preview` = release flavor, `debug` = debug flavor.
+the flavor** (the csharp-agent contract): `release` = release flavor, `debug` = debug flavor.
 The CI smoke test runs the release flavor only (a debug popup would park an unattended runner
 forever). Never deliver the `debug` flavor to an operational target.
 

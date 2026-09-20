@@ -22,8 +22,8 @@
 # the marker is a LINE TAG): any source line ending in a #dbg comment exists ONLY in the
 # debug build. build.ps1 splits the flavors — dist/ (release) drops every tagged line
 # outright (zero diagnostics remain, CI-gated), dist-debug/ keeps the code and drops the
-# tag suffix. CI publishes dist/ to the rolling 'preview' release and dist-debug/ to the
-# rolling 'debug' release: the tag is the flavor, the asset filename is shared. The debug
+# tag suffix. CI publishes dist/ to the rolling 'release' tag and dist-debug/ to the
+# rolling 'debug' tag: the tag is the flavor, the asset filename is shared. The debug
 # build pops a blocking topmost MessageBox per milestone (the csharp-agent Diag.Show
 # contract — operator-visible, one click per call, hand-debugging only). The CI smoke
 # test runs the RELEASE flavor: a debug popup would park the runner forever.
