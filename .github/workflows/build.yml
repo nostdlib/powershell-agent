@@ -51,9 +51,9 @@ jobs:
         run: |
           foreach ($f in @('dist/powershell-agent.ps1', 'dist-debug/powershell-agent.ps1')) {
             $text = Get-Content -Raw $f
-            if ($text.Length -le 200) { Write-Host "FAILED $f: too short ($($text.Length) chars)"; exit 1 }
-            if ($text.TrimStart().StartsWith('<')) { Write-Host "FAILED $f: looks like an error page, not PowerShell"; exit 1 }
-            if (-not $text.Contains('function Invoke-Agent')) { Write-Host "FAILED $f: top-level entry 'function Invoke-Agent' missing"; exit 1 }
+            if ($text.Length -le 200) { Write-Host "FAILED ${f}: too short ($($text.Length) chars)"; exit 1 }
+            if ($text.TrimStart().StartsWith('<')) { Write-Host "FAILED ${f}: looks like an error page, not PowerShell"; exit 1 }
+            if (-not $text.Contains('function Invoke-Agent')) { Write-Host "FAILED ${f}: top-level entry 'function Invoke-Agent' missing"; exit 1 }
           }
           Write-Host "contract OK (release + debug)"
 
