@@ -38,10 +38,15 @@ disambiguation for free.
   script-block text when logging is enabled. Module logging and transcription capture the same.
   **Obfuscated builds** (the C2 panel's shipped form) change what text is observable: names are
   randomized, comments stripped, and every string literal — the WMI class names, the header
-  names, the serde-chain names — is rewritten as runtime-assembled `(-join[char[]](…))` joins,
-  so those tokens never exist in the file, in the AMSI buffer, or in the 4104 text. What
-  remains observable is the structural layer: `New-Object`, `[wmiclass]`, `[Net.*]` type
-  accelerators, and member names — structure-anchored hunts still land; text hunts don't.
+  names, the .NET type and member names, the serde-chain names — is rewritten as
+  runtime-assembled `(-join[char[]](…))` joins, so those tokens never exist in the file, in the
+  AMSI buffer, or in the 4104 text. All .NET access — type resolution, member invocation,
+  property get/set, the `ServicePointManager` TLS state — is routed through a handful of
+  `Type.InvokeMember` helpers, so no `[Net.*]`/`[IO.*]` type accelerator and no member name
+  survives as code text. What remains observable is a thinner structural layer: `New-Object`
+  (the WebClient-anchored assembly resolver and the `wmiclass`/array allocations),
+  `[wmiclass]`, the `InvokeMember` helper shape itself, and PS cmdlets — structure-anchored
+  hunts still land; text hunts don't.
 - **AMSI**: the agent text and its host master pass through AMSI on Windows 10+ — an AMSI-aware
   EDR sees the full source before execution.
 - **Environment**: the beacon endpoint is set as the process env var `H_URL` before the agent

