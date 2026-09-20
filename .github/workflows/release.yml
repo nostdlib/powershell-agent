@@ -20,25 +20,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Syntax check (Parser::ParseFile)
+      # Stable tags carry the RELEASE flavor only (every #dbg-tagged line stripped,
+      # zero diagnostics — build.ps1 also parse/contract-gates both flavors). The
+      # debug flavor lives solely on the rolling 'debug' pre-release (build.yml).
+      - name: Flavor split (build.ps1)
         shell: pwsh
-        run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Join-Path $PWD 'src/powershell-agent.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
-          if ($errors -and $errors.Count -gt 0) {
-            $errors | ForEach-Object {
-              Write-Host ("PARSE ERROR line {0}: {1}" -f $_.Extent.StartLineNumber, $_.Message)
-            }
-            exit 1
-          }
-          Write-Host "syntax OK"
+        run: ./build.ps1
 
       - name: Collect release files
         run: |
           mkdir -p artifacts
-          cp src/powershell-agent.ps1 artifacts/
+          cp dist/powershell-agent.ps1 artifacts/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7

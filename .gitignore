@@ -1,0 +1,4 @@
+# build outputs (the flavor split — rebuilt by build.ps1 / CI)
+/dist/
+/dist-debug/
+master.ps1
