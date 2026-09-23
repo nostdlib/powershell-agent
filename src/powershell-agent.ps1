@@ -18,6 +18,10 @@
 #     their type. Variable-stored references (PSObject-wrapped) are re-cast at the call site.
 #   • ',' binds LOOSER than arithmetic: @(a, b, c - 1) parses @(a, b, c) - 1 ("op_Subtraction"
 #     on Object[]). Hoist arithmetic into a variable before building an args array.
+#   • A HELPER RETURN re-passed as a binder arg must be unwrapped @(…)[0] and cast: the
+#     comma-wrap survives assignment on PS 2.0 as a PSObject wrapper the CLR2 binder
+#     refuses ("MemoryStream.Write not found" — every Win7 command delivery died in the
+#     answer read, 2026-09-23). A language cast ([int]x) strips it; a raw re-bind doesn't.
 # All constructs are .NET 2.0 / PS 2.0-safe per the host contract.
 #
 # DEBUG FLAVOR (the csharp-agent "#if DEBUG" analog — PowerShell has no preprocessor, so
