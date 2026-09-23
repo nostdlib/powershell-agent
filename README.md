@@ -89,9 +89,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1
 ```
 
 The debug build pops a **blocking topmost MessageBox per milestone** (the csharp-agent
-`Diag.Show` contract — WScript.Shell `Popup`, caption `ps-agent dbg <step>`): `[1] start`,
-`[2] H_URL`, `[3] tls`, `[5] identity`, `[6]`/`[7] POST #1` (first beacon cycle only — healthy
-idle iterations stay silent), `[cmd] 0x…` per dispatched command, `[exit] …` on fatal branches,
+`Diag.Show` contract — WScript.Shell `Popup`, caption `ps-agent dbg <step>`): `[1] start`
+(pid + PS/CLR versions), `[2] H_URL`, `[3] tls`, `[5] identity`, `[6]`/`[7] POST #1` (first
+beacon cycle only — healthy idle iterations stay silent), then the command-path stages —
+`[ans] bytes` / `[ans] head` (a NON-empty answer only: length + first 8 bytes in hex),
+`[frames] n` (parsed frame count), `[cmd] 0x…` per dispatched command, `[0x0A] flag set` /
+`[0x0A] unwinding` (the Exit unwind), `[loop] threw` (the dispatch loop's debug-only
+try/catch — pops instead of the process dying silently), `[exit] …` on fatal branches,
 `[0x0B] upgrade failed` with the exception message. Hand-debugging only: popups are
 operator-visible and every call costs a click.
 
