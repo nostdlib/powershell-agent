@@ -185,28 +185,42 @@ function Invoke-Agent {
     $GuidRe = '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
     function LoadGuid {
         $guid = ''
-        # 32-bit Windows PowerShell on a 64-bit OS gets HKLM\SOFTWARE redirected to
-        # Wow6432Node (where MachineGuid doesn't exist) — the WMI StdRegProv fallback reads
-        # the 64-bit view and is what actually saves that case.
+        # CANONICAL machine uuid (docs/11 §4.3 — one chain every breed shares, so one
+        # machine is one agent row): SMBIOS type-1 uuid first — the exact string
+        # Win32_ComputerSystemProduct.UUID returns — then the 64-bit-view MachineGuid.
         try {
-            $v = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid
-            $guid = ('' + $v).ToLower()
+            foreach ($cs in ([wmiclass]'\\.\root\cimv2:Win32_ComputerSystemProduct').GetInstances()) {
+                $u = ('' + $cs.UUID).ToLower()
+                # all-0x00 ("not present") / all-0xFF ("not set") mean the firmware
+                # carries no uuid — skip, never emit a zero/FF guid.
+                if ($u -match $GuidRe -and
+                    $u -ne '00000000-0000-0000-0000-000000000000' -and
+                    $u -ne 'ffffffff-ffff-ffff-ffff-ffffffffffff') { $guid = $u; break }
+            }
         } catch {}
         if ($guid -notmatch $GuidRe) {
+            # MachineGuid from the native 64-bit view: 64-bit PowerShell reads it
+            # directly; 32-bit Windows PowerShell on a 64-bit OS gets HKLM\SOFTWARE
+            # redirected to Wow6432Node (where MachineGuid doesn't exist). The WMI
+            # StdRegProv fallback must then FORCE the 64-bit provider via the
+            # connection context (__ProviderArchitecture) — by default a 32-bit
+            # client is served the 32-bit provider and would read the redirected
+            # view too.
             try {
-                $rk = [wmiclass]'\\.\root\default:StdRegProv'
-                $r = $rk.GetStringValue(2147483650, 'SOFTWARE\Microsoft\Cryptography', 'MachineGuid')
-                if ($r.ReturnValue -eq 0) { $guid = ('' + $r.sValue).ToLower() }
+                $v = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -ErrorAction Stop).MachineGuid
+                $guid = ('' + $v).ToLower()
             } catch {}
-        }
-        if ($guid -notmatch $GuidRe) {
-            # Fall back to the SMBIOS hardware UUID; stable across OS reinstalls.
-            try {
-                foreach ($cs in ([wmiclass]'\\.\root\cimv2:Win32_ComputerSystemProduct').GetInstances()) {
-                    $u = ('' + $cs.UUID).ToLower()
-                    if ($u -match $GuidRe) { $guid = $u }
-                }
-            } catch {}
+            if ($guid -notmatch $GuidRe) {
+                try {
+                    $loc = New-Object -ComObject WbemScripting.SWbemLocator
+                    $ctx = New-Object -ComObject WbemScripting.SWbemNamedValueSet
+                    $null = $ctx.Add('__ProviderArchitecture', 64)
+                    $null = $ctx.Add('__RequiredArchitecture', $true)
+                    $rk = $loc.ConnectServer('.', 'root\default', $null, $null, $null, $null, $null, $ctx).Get('StdRegProv')
+                    $r = $rk.GetStringValue(2147483650, 'SOFTWARE\Microsoft\Cryptography', 'MachineGuid')
+                    if ($r.ReturnValue -eq 0) { $guid = ('' + $r.sValue).ToLower() }
+                } catch {}
+            }
         }
         return $guid
     }
